@@ -1,6 +1,7 @@
 #pragma once
 
 #include "offsets.hpp"
+#include "../core/startup_pointer_probe.hpp"
 #include "datatypes\vector2.hpp"
 #include "datatypes\vector3.hpp"
 #include "datatypes\matrix.hpp"
@@ -47,8 +48,15 @@ namespace sdk
 
 	inline bool  esp_enabled = true;
 	inline bool  radar_enabled = true; // Marcadores enemigos sobre el mapa/minimapa nativo.
+	inline bool menu_multimonitor_enabled = false; // opt-in experimental; no guarda preferencias
 	inline ImVec4 radar_enemy_color = ImVec4(1.0f, 0.255f, 0.255f, 0.96f);
 	inline bool  aimbot_enabled = false;
+	inline const char* ground_prediction_status = "Esperando datos";
+	inline bool ground_prediction_screen_known = false;
+	inline float ground_prediction_screen_x = 0.f, ground_prediction_screen_y = 0.f;
+	inline float ground_prediction_viewport_width = 0.f, ground_prediction_viewport_height = 0.f;
+	inline const char* ground_velocity_source = "Sin lectura";
+	inline const char* ground_ballistics_source = "Sin lectura";
 	inline float esp_render_distance = 2000.0f;
 	inline float esp_box_distance = 2000.0f;
 	inline bool  esp_show_boxes = true;
@@ -56,6 +64,11 @@ namespace sdk
 	inline bool  esp_show_vehicle_names = true;
 	inline bool  esp_show_distance = true;
 	inline bool  esp_show_reload = false;
+	inline bool  esp_show_invulnerable = true;
+	inline bool  esp_invul_show_timer = true;
+	inline float esp_invul_distance = 2000.f;
+	inline float esp_font_size_invul = 9.f;
+	inline ImVec4 color_invulnerable = ImVec4(.98f,.72f,.28f,1.f);
 	inline bool  esp_show_reload_seconds = false;
 	inline bool  esp_show_fps = true;
 	inline bool  esp_vsync_enabled = false;
@@ -68,7 +81,7 @@ namespace sdk
 	inline bool projectile_debug = false;
 	inline bool  projectile_incoming_only = false;
 	inline bool  projectile_incoming_use_localplayer = true; // usa el jugador local confirmado del snapshot
-	inline bool  projectile_aam_only = true; // dibuja solo misiles aire-aire (filtra AGM, bombas, cohetes y bengalas)
+	inline bool  projectile_aam_only = true; // valor por defecto por nombre; casillas explicitas prevalecen
 	inline float projectile_incoming_distance = 3000.0f;
 	inline float projectile_incoming_angle = 30.0f;
 	inline int projectile_scan_budget = 4096;
@@ -121,8 +134,6 @@ namespace sdk
 
 	inline float xray_small_module_distance = 300.0f;
 	inline float xray_line_thickness = 1.5f;
-	inline int   xray_render_mode = 2;
-	inline bool  xray_wireframe_overlay = false;
 	inline bool  xray_alpha_falloff = true;
 	inline float xray_module_alpha = 1.0f;
 	inline int   xray_axis_fix_mode = 3;   // 0=(-y,x,z)  1=(x,z,-y)  2=(y,-x,z)  3=sin conversion (default: TMatrix Dagor ya convierte ejes)
@@ -161,7 +172,14 @@ namespace sdk
 	// Air Lead Indicator
 	inline bool air_lead_enabled = true;
 	inline bool air_lead_use_simulation = true;
+	inline const char* air_lead_status = "A2A desactivado";
+	inline const char* air_lead_own_motion_status = "Sin muestra";
+	inline const char* air_lead_target_motion_status = "Sin muestra";
+	inline float air_lead_flight_time=0.f,air_lead_model_error=0.f;
 	inline ImVec4 air_lead_sim_color = ImVec4(1.0f, 0.5f, 0.0f, 0.8f);
+	inline float air_lead_opacity = 0.60f; // Marker and connector opacity.
+	inline bool air_lead_coverage_opacity = true; // Opaque spatial coverage avoids drivers that darken partial alpha to black.
+	inline float menu_ui_scale = 1.0f;
 	inline float air_lead_marker_size = 5.0f;
 	inline float air_lead_line_thickness = 1.0f;
 
@@ -170,7 +188,7 @@ namespace sdk
 	inline bool  air_lead_smooth_adaptive = true;
 	inline float air_lead_smooth_min_alpha = 0.30f;
 	inline float air_lead_smooth_max_alpha = 0.85f;
-	inline bool  air_lead_use_turn_prediction = false;
+	inline bool  air_lead_use_turn_prediction = true;
 
 	// Air Lead Targets
 	inline bool air_lead_target_helicopter = true;
@@ -189,21 +207,31 @@ namespace sdk
 
 	inline c_game* cGame = new c_game;
 	inline c_entity* cLocalPlayer = new c_entity;
+	inline const char* startup_error = "No inicializado";
 
 	inline auto init() -> bool
 	{
-		if (!cGame->init())
-			return false;
-
-		if (!cLocalPlayer->init())
-			return false;
-
-		if (!cGame->ballistics->init(cGame->get_base()))
-			return false;
-
-		if (!cGame->camera->init(cGame->get_base()))
-			return false;
-
+		// Comprobar los cuatro punteros SIN seguir un cGame invalido.
+		// Los offsets incorporados pueden corresponder a otra version del juego.
+		const startup_pointer_probe::layout fields{
+			offsets::cgame_offset,offsets::localplayer_offset,
+			offsets::cgame_offsets::ballistics_offset,
+			offsets::cgame_offsets::camera_offset
+		};
+		const auto probe=startup_pointer_probe::inspect(runtime::base_address(),
+			runtime::base_size(),fields,[](std::uintptr_t address,void* out,std::size_t size){
+				return TargetProcess->ReadOptional(address,out,size);
+			});
+		if(!probe.ok){startup_error=probe.reason;return false;}
+		// Conservar exactamente la instantánea ya validada: sin segundo
+		// read DMA que pudiera reintroducir un puntero corrupto entre lecturas.
+		if(!cGame->init_from_validated_base(probe.cgame) ||
+		   !cLocalPlayer->init_from_validated_base(probe.localplayer) ||
+		   !cGame->ballistics->init_from_validated_base(probe.ballistics) ||
+		   !cGame->camera->init_from_validated_base(probe.camera)) {
+			startup_error="Falló la activación de punteros validados";return false;
+		}
+		startup_error="Inicializado";
 		return true;
 	}
 }

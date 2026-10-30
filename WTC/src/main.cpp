@@ -1,13 +1,23 @@
 #include "includes.hpp"
-#include "core/update.hpp"
 #include "core/core.hpp"
+#include "core/app_version.hpp"
 #include "core/config.hpp"
+#include "core/hotkey_validation.hpp"
+#include "core/missile_registry_storage.hpp"
+#include "gui/overlay_profile_position.hpp"
 #include <commdlg.h>
+#include <dcomp.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+#pragma comment(lib, "dcomp.lib")
 
 // Data
 static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
-static IDXGISwapChain* g_pSwapChain = nullptr;
+static IDXGISwapChain1* g_pSwapChain = nullptr;
+static IDCompositionDevice* g_compositionDevice = nullptr;
+static IDCompositionTarget* g_compositionTarget = nullptr;
+static IDCompositionVisual* g_compositionVisual = nullptr;
 static bool                     g_SwapChainOccluded = false;
 static UINT                     g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
@@ -139,10 +149,28 @@ namespace GUI
         bool  esp_show_vehicle_names = true;
         bool  esp_show_distance = true;
         bool  esp_show_reload = false;
+        bool  esp_show_invulnerable = true;
+        bool  esp_invul_show_timer = true;
+        float esp_invul_distance = 2000.f;
+        float esp_font_size_invul = 9.f;
+        ImVec4 color_invulnerable = ImVec4(.98f,.72f,.28f,1.f);
         bool  esp_show_reload_seconds = false;
         bool  esp_show_fps = true;
         bool  esp_show_bomb_impact = true;
         bool  esp_only_show_planes = false;
+
+        // Projectile settings participate in manual saving and every profile.
+        bool projectile_esp_enabled = false;
+        bool projectile_debug = false;
+        bool projectile_incoming_only = false;
+        bool projectile_incoming_use_localplayer = true;
+        bool projectile_aam_only = true;
+        std::map<std::string,bool> missile_overrides;
+        std::array<bool,esp::radar::icons::visible.size()> radar_kinds = [] {
+            std::array<bool,esp::radar::icons::visible.size()> result{}; result.fill(true); return result; }();
+        float projectile_incoming_distance = 3000.0f;
+        float projectile_incoming_angle = 30.0f;
+        int projectile_scan_budget = 4096;
 
         // Vehicle filters
         bool show_helicopter = true;
@@ -180,8 +208,6 @@ namespace GUI
         // X-Ray
         bool  bShowDamageModel = false;
         bool  bShowModuleNames = false;
-        int   xray_render_mode = 1;
-        bool  xray_wireframe_overlay = true;
         bool  bShowModuleGunBarrel = true;
         bool  bShowModuleCannonBreech = true;
         bool  bShowModuleCrew = true;
@@ -207,13 +233,16 @@ namespace GUI
         bool  air_lead_enabled = false;
         bool  air_lead_use_simulation = true;
         ImVec4 air_lead_sim_color = ImVec4(0.0f, 1.0f, 1.0f, 1.0f);
+        float air_lead_opacity = 0.60f;
+        bool air_lead_coverage_opacity = true;
+        float menu_ui_scale = 1.0f;
         float air_lead_marker_size = 5.0f;
         float air_lead_line_thickness = 1.2f;
         bool  air_lead_use_weapon_position = false;
         bool  air_lead_smooth_adaptive = true;
         float air_lead_smooth_min_alpha = 0.30f;
         float air_lead_smooth_max_alpha = 0.85f;
-        bool  air_lead_use_turn_prediction = false;
+        bool  air_lead_use_turn_prediction = true;
         bool  air_lead_target_helicopter = true;
         bool  air_lead_target_recon_drone = true;
         bool  air_lead_target_fighter = true;
@@ -258,129 +287,14 @@ namespace GUI
     bool menu_open = true;
     int active_preset = 0;
     std::array<menu_preset_t, 5> presets = {};
+    std::string configuration_warning;
 
     struct bool_binding_t { bool menu_preset_t::* preset; bool* runtime; };
     struct float_binding_t { float menu_preset_t::* preset; float* runtime; };
     struct color_binding_t { ImVec4 menu_preset_t::* preset; ImVec4* runtime; };
     struct int_binding_t { int menu_preset_t::* preset; int* runtime; };
 
-    // ---- Tamaños EXACTOS (bug #1 corregido) ----
-    inline const std::array<bool_binding_t, 50> bool_bindings = { {
-        { &menu_preset_t::esp_enabled, &sdk::esp_enabled },
-        { &menu_preset_t::radar_enabled, &sdk::radar_enabled },
-        { &menu_preset_t::aimbot_enabled, &sdk::aimbot_enabled },
-        { &menu_preset_t::esp_show_boxes, &sdk::esp_show_boxes },
-        { &menu_preset_t::esp_use_3d_boxes, &sdk::esp_use_3d_boxes },
-        { &menu_preset_t::esp_show_vehicle_names, &sdk::esp_show_vehicle_names },
-        { &menu_preset_t::esp_show_distance, &sdk::esp_show_distance },
-        { &menu_preset_t::esp_show_reload, &sdk::esp_show_reload },
-        { &menu_preset_t::esp_show_reload_seconds, &sdk::esp_show_reload_seconds },
-        { &menu_preset_t::esp_show_fps, &sdk::esp_show_fps },
-        { &menu_preset_t::esp_show_bomb_impact, &sdk::esp_show_bomb_impact },
-        { &menu_preset_t::esp_only_show_planes, &sdk::esp_only_show_planes },
-        { &menu_preset_t::show_helicopter, &sdk::show_helicopter },
-        { &menu_preset_t::show_bomber, &sdk::show_bomber },
-        { &menu_preset_t::show_fighter, &sdk::show_fighter },
-        { &menu_preset_t::show_attacker, &sdk::show_attacker },
-        { &menu_preset_t::show_light_tank, &sdk::show_light_tank },
-        { &menu_preset_t::show_heavy_tank, &sdk::show_heavy_tank },
-        { &menu_preset_t::show_medium_tank, &sdk::show_medium_tank },
-        { &menu_preset_t::show_spaa, &sdk::show_spaa },
-        { &menu_preset_t::show_gun_boat, &sdk::show_gun_boat },
-        { &menu_preset_t::show_destroyer, &sdk::show_destroyer },
-        { &menu_preset_t::show_cruiser, &sdk::show_cruiser },
-        { &menu_preset_t::show_torpedo_boat, &sdk::show_torpedo_boat },
-        { &menu_preset_t::show_recon_drone, &sdk::show_recon_drone },
-        { &menu_preset_t::bShowDamageModel, &sdk::bShowDamageModel },
-        { &menu_preset_t::bShowModuleNames, &sdk::bShowModuleNames },
-        { &menu_preset_t::xray_wireframe_overlay, &sdk::xray_wireframe_overlay },
-        { &menu_preset_t::bShowModuleGunBarrel, &sdk::bShowModuleGunBarrel },
-        { &menu_preset_t::bShowModuleCannonBreech, &sdk::bShowModuleCannonBreech },
-        { &menu_preset_t::bShowModuleCrew, &sdk::bShowModuleCrew },
-        { &menu_preset_t::bShowModuleFuelTank, &sdk::bShowModuleFuelTank },
-        { &menu_preset_t::bShowModuleAmmoRack, &sdk::bShowModuleAmmoRack },
-        { &menu_preset_t::bShowModuleEngine, &sdk::bShowModuleEngine },
-        { &menu_preset_t::bShowModuleTransmission, &sdk::bShowModuleTransmission },
-        { &menu_preset_t::xray_alpha_falloff, &sdk::xray_alpha_falloff },
-        { &menu_preset_t::air_lead_enabled, &sdk::air_lead_enabled },
-        { &menu_preset_t::air_lead_use_simulation, &sdk::air_lead_use_simulation },
-        { &menu_preset_t::air_lead_use_weapon_position, &sdk::air_lead_use_weapon_position },
-        { &menu_preset_t::air_lead_smooth_adaptive, &sdk::air_lead_smooth_adaptive },
-        { &menu_preset_t::air_lead_use_turn_prediction, &sdk::air_lead_use_turn_prediction },
-        { &menu_preset_t::air_lead_target_helicopter, &sdk::air_lead_target_helicopter },
-        { &menu_preset_t::air_lead_target_recon_drone, &sdk::air_lead_target_recon_drone },
-        { &menu_preset_t::air_lead_target_fighter, &sdk::air_lead_target_fighter },
-        { &menu_preset_t::air_lead_target_bomber, &sdk::air_lead_target_bomber },
-        { &menu_preset_t::air_lead_target_attacker, &sdk::air_lead_target_attacker },
-        { &menu_preset_t::air_lead_only_target, &sdk::air_lead_only_target },
-        { &menu_preset_t::air_lead_use_heaviest_weapon, &sdk::air_lead_use_heaviest_weapon },
-        { &menu_preset_t::esp_vsync_enabled, &sdk::esp_vsync_enabled },
-        { &menu_preset_t::auto_fullscreen_on_start, &sdk::auto_fullscreen_on_start }
-    } };
-
-    inline const std::array<float_binding_t, 16> float_bindings = { {
-        { &menu_preset_t::esp_render_distance, &sdk::esp_render_distance },
-        { &menu_preset_t::esp_box_distance, &sdk::esp_box_distance },
-        { &menu_preset_t::xray_small_module_distance, &sdk::xray_small_module_distance },
-        { &menu_preset_t::xray_line_thickness, &sdk::xray_line_thickness },
-        { &menu_preset_t::xray_module_alpha, &sdk::xray_module_alpha },
-        { &menu_preset_t::xray_render_distance, &sdk::xray_render_distance },
-        { &menu_preset_t::xray_names_distance, &sdk::xray_names_distance },
-        { &menu_preset_t::air_lead_marker_size, &sdk::air_lead_marker_size },
-        { &menu_preset_t::air_lead_line_thickness, &sdk::air_lead_line_thickness },
-        { &menu_preset_t::air_lead_smooth_min_alpha, &sdk::air_lead_smooth_min_alpha },
-        { &menu_preset_t::air_lead_smooth_max_alpha, &sdk::air_lead_smooth_max_alpha },
-        { &menu_preset_t::air_lead_extra_time, &sdk::air_lead_extra_time },
-        { &menu_preset_t::esp_font_size_name, &sdk::esp_font_size_name },
-        { &menu_preset_t::esp_font_size_distance, &sdk::esp_font_size_distance },
-        { &menu_preset_t::esp_font_size_reload, &sdk::esp_font_size_reload },
-        { &menu_preset_t::esp_font_size_module, &sdk::esp_font_size_module }
-    } };
-
-    inline const std::array<color_binding_t, 22> color_bindings = { {
-        { &menu_preset_t::color_helicopter, &sdk::color_helicopter },
-        { &menu_preset_t::color_bomber, &sdk::color_bomber },
-        { &menu_preset_t::color_fighter, &sdk::color_fighter },
-        { &menu_preset_t::color_attacker, &sdk::color_attacker },
-        { &menu_preset_t::color_light_tank, &sdk::color_light_tank },
-        { &menu_preset_t::color_heavy_tank, &sdk::color_heavy_tank },
-        { &menu_preset_t::color_medium_tank, &sdk::color_medium_tank },
-        { &menu_preset_t::color_spaa, &sdk::color_spaa },
-        { &menu_preset_t::color_gun_boat, &sdk::color_gun_boat },
-        { &menu_preset_t::color_destroyer, &sdk::color_destroyer },
-        { &menu_preset_t::color_cruiser, &sdk::color_cruiser },
-        { &menu_preset_t::color_torpedo_boat, &sdk::color_torpedo_boat },
-        { &menu_preset_t::color_recon_drone, &sdk::color_recon_drone },
-        { &menu_preset_t::radar_enemy_color, &sdk::radar_enemy_color },
-        { &menu_preset_t::color_mod_gun_barrel, &sdk::color_mod_gun_barrel },
-        { &menu_preset_t::color_mod_cannon_breech, &sdk::color_mod_cannon_breech },
-        { &menu_preset_t::color_mod_crew, &sdk::color_mod_crew },
-        { &menu_preset_t::color_mod_fuel_tank, &sdk::color_mod_fuel_tank },
-        { &menu_preset_t::color_mod_ammo_rack, &sdk::color_mod_ammo_rack },
-        { &menu_preset_t::color_mod_engine, &sdk::color_mod_engine },
-        { &menu_preset_t::color_mod_transmission, &sdk::color_mod_transmission },
-        { &menu_preset_t::air_lead_sim_color, &sdk::air_lead_sim_color }
-    } };
-
-    inline const std::array<int_binding_t, 17> int_bindings = { {
-        { &menu_preset_t::xray_render_mode, &sdk::xray_render_mode },
-        { &menu_preset_t::menu_style, &sdk::menu_style },
-        { &menu_preset_t::esp_vsync_fps, &sdk::esp_vsync_fps },
-        { &menu_preset_t::death_state_threshold, &sdk::death_state_threshold },
-        { &menu_preset_t::air_lead_weapon_selection, &sdk::air_lead_weapon_selection },
-        { &menu_preset_t::xray_toggle_key, &sdk::xray_toggle_key },
-        { &menu_preset_t::key_esp_enable, &sdk::key_esp_enable },
-        { &menu_preset_t::key_aimbot_enable, &sdk::key_aimbot_enable },
-        { &menu_preset_t::key_air_lead_enable, &sdk::key_air_lead_enable },
-        { &menu_preset_t::key_3d_box, &sdk::key_3d_box },
-        { &menu_preset_t::key_2d_box, &sdk::key_2d_box },
-        { &menu_preset_t::key_vehicle_name, &sdk::key_vehicle_name },
-        { &menu_preset_t::key_distance, &sdk::key_distance },
-        { &menu_preset_t::key_show_crew, &sdk::key_show_crew },
-        { &menu_preset_t::key_show_barrel, &sdk::key_show_barrel },
-        { &menu_preset_t::key_show_ammorack, &sdk::key_show_ammorack },
-        { &menu_preset_t::key_show_fueltank, &sdk::key_show_fueltank }
-    } };
+    #include "gui/preset_bindings.hpp"
 
     menu_preset_t capture_current_settings()
     {
@@ -390,6 +304,9 @@ namespace GUI
         for (const auto& c : color_bindings)  preset.*(c.preset) = *c.runtime;
         for (const auto& i : int_bindings)    preset.*(i.preset) = *i.runtime;
         preset.monitor_index = sdk::monitor_index;
+        preset.missile_overrides = projectile_visibility::capture();
+        preset.radar_kinds = esp::radar::icons::visible;
+        preset.name = presets[std::clamp(active_preset,0,static_cast<int>(presets.size())-1)].name;
         return preset;
     }
 
@@ -400,6 +317,8 @@ namespace GUI
         for (const auto& c : color_bindings)  *c.runtime = preset.*(c.preset);
         for (const auto& i : int_bindings)    *i.runtime = preset.*(i.preset);
         sdk::monitor_index = clamp_monitor_index(preset.monitor_index, sdk::monitor_count);
+        projectile_visibility::apply(preset.missile_overrides);
+        esp::radar::icons::visible = preset.radar_kinds;
     }
 
     void initialize_presets()
@@ -441,13 +360,27 @@ namespace GUI
 
     void load_presets_from_map(const std::unordered_map<std::string, std::string>& values)
     {
+        configuration_warning.clear();
+        // Restaurar nombres observados de la configuracion guardada manualmente.
+        if (auto it=values.find("missile_catalog_count"); it!=values.end()) {
+            const int count=std::clamp(config::parse_int(it->second,0),0,
+                static_cast<int>(projectile_visibility::max_names));
+            std::vector<std::string> names; names.reserve(count);
+            for (int j=0;j<count;++j) {
+                auto item=values.find("missile_catalog_"+std::to_string(j));
+                if (item==values.end()) continue;
+                const auto name=projectile_visibility::hex_decode(item->second);
+                if (!name.empty()) names.push_back(name);
+            }
+            projectile_visibility::restore_observed(names);
+        }
         for (int i = 0; i < static_cast<int>(presets.size()); ++i)
         {
             menu_preset_t loaded = presets[i];
             const std::string prefix = "preset" + std::to_string(i + 1) + "_";
 
             if (auto it = values.find(prefix + "name"); it != values.end())
-                loaded.name = it->second;
+                loaded.name = it->second.substr(0,63);
 
             auto read_bool = [&](const char* key, bool& target) {
                 const auto it = values.find(prefix + key);
@@ -466,6 +399,37 @@ namespace GUI
                 if (it != values.end()) config::apply_color(target, it->second);
                 };
 
+            read_bool("projectile_esp_enabled", loaded.projectile_esp_enabled);
+            read_bool("projectile_debug", loaded.projectile_debug);
+            read_bool("projectile_incoming_only", loaded.projectile_incoming_only);
+            read_bool("projectile_incoming_use_localplayer", loaded.projectile_incoming_use_localplayer);
+            read_bool("projectile_aam_only", loaded.projectile_aam_only);
+            loaded.missile_overrides.clear();
+            for (std::size_t j=0;j<loaded.radar_kinds.size();++j) {
+                loaded.radar_kinds[j]=true;
+                if (auto it=values.find(prefix+"radar_kind_"+std::to_string(j)); it!=values.end())
+                    loaded.radar_kinds[j]=config::parse_bool(it->second,true);
+            }
+            if (auto it=values.find(prefix+"missile_count"); it!=values.end()) {
+                const int count=std::clamp(config::parse_int(it->second,0),0,
+                    static_cast<int>(projectile_visibility::max_names));
+                for (int j=0;j<count;++j) {
+                    auto item=values.find(prefix+"missile_"+std::to_string(j));
+                    if (item==values.end()) continue;
+                    const auto& encoded=item->second;
+                    const auto colon=encoded.find(':');
+                    if (colon==std::string::npos || colon+2!=encoded.size() ||
+                        (encoded.back()!='0' && encoded.back()!='1')) continue;
+                    const auto name=projectile_visibility::hex_decode(
+                        std::string_view(encoded).substr(0,colon));
+                    if (!name.empty() && !projectile_ecs::name_has_flare(name.c_str()))
+                        loaded.missile_overrides[name]=encoded.back()=='1';
+                }
+            }
+            read_float("projectile_incoming_distance", loaded.projectile_incoming_distance);
+            read_float("projectile_incoming_angle", loaded.projectile_incoming_angle);
+            read_int("projectile_scan_budget", loaded.projectile_scan_budget);
+
             // ESP
             read_bool("esp_enabled", loaded.esp_enabled);
             read_bool("radar_enabled", loaded.radar_enabled);
@@ -477,6 +441,9 @@ namespace GUI
             read_bool("esp_show_vehicle_names", loaded.esp_show_vehicle_names);
             read_bool("esp_show_distance", loaded.esp_show_distance);
             read_bool("esp_show_reload", loaded.esp_show_reload);
+            read_bool("esp_show_invulnerable", loaded.esp_show_invulnerable);
+            read_bool("esp_invul_show_timer", loaded.esp_invul_show_timer);
+            read_float("esp_invul_distance", loaded.esp_invul_distance);
             read_bool("esp_show_reload_seconds", loaded.esp_show_reload_seconds);
             read_bool("esp_show_fps", loaded.esp_show_fps);
             read_bool("esp_show_bomb_impact", loaded.esp_show_bomb_impact);
@@ -514,12 +481,11 @@ namespace GUI
             read_color("color_torpedo_boat", loaded.color_torpedo_boat);
             read_color("color_recon_drone", loaded.color_recon_drone);
             read_color("radar_enemy_color", loaded.radar_enemy_color);
+            read_color("color_invulnerable", loaded.color_invulnerable);
 
             // X-Ray
             read_bool("bShowDamageModel", loaded.bShowDamageModel);
             read_bool("bShowModuleNames", loaded.bShowModuleNames);
-            read_int("xray_render_mode", loaded.xray_render_mode);
-            read_bool("xray_wireframe_overlay", loaded.xray_wireframe_overlay);
             read_bool("bShowModuleGunBarrel", loaded.bShowModuleGunBarrel);
             read_bool("bShowModuleCannonBreech", loaded.bShowModuleCannonBreech);
             read_bool("bShowModuleCrew", loaded.bShowModuleCrew);
@@ -545,6 +511,9 @@ namespace GUI
             read_bool("air_lead_enabled", loaded.air_lead_enabled);
             read_bool("air_lead_use_simulation", loaded.air_lead_use_simulation);
             read_color("air_lead_sim_color", loaded.air_lead_sim_color);
+            read_float("air_lead_opacity", loaded.air_lead_opacity);
+            read_bool("air_lead_coverage_opacity", loaded.air_lead_coverage_opacity);
+            read_float("menu_ui_scale", loaded.menu_ui_scale);
             read_float("air_lead_marker_size", loaded.air_lead_marker_size);
             read_float("air_lead_line_thickness", loaded.air_lead_line_thickness);
             read_bool("air_lead_use_weapon_position", loaded.air_lead_use_weapon_position);
@@ -571,6 +540,7 @@ namespace GUI
             read_float("esp_font_size_name", loaded.esp_font_size_name);
             read_float("esp_font_size_distance", loaded.esp_font_size_distance);
             read_float("esp_font_size_reload", loaded.esp_font_size_reload);
+            read_float("esp_font_size_invul", loaded.esp_font_size_invul);
             read_float("esp_font_size_module", loaded.esp_font_size_module);
 
             // Keybinds
@@ -586,6 +556,18 @@ namespace GUI
             read_int("key_show_barrel", loaded.key_show_barrel);
             read_int("key_show_ammorack", loaded.key_show_ammorack);
             read_int("key_show_fueltank", loaded.key_show_fueltank);
+            std::array<int*,12> bindings = {&loaded.xray_toggle_key,&loaded.key_esp_enable,
+                &loaded.key_aimbot_enable,&loaded.key_air_lead_enable,&loaded.key_3d_box,&loaded.key_2d_box,
+                &loaded.key_vehicle_name,&loaded.key_distance,&loaded.key_show_crew,&loaded.key_show_barrel,
+                &loaded.key_show_ammorack,&loaded.key_show_fueltank};
+            std::array<int,12> keys{};
+            for(size_t j=0;j<keys.size();++j) keys[j]=*bindings[j];
+            const int repaired=hotkey_validation::sanitize(keys);
+            for(size_t j=0;j<keys.size();++j) *bindings[j]=keys[j];
+            if(repaired) {
+                configuration_warning="Atajos inválidos/duplicados reparados al cargar (F1/F2 reservadas).";
+                LOG("[CONFIG] Preset %d: %d atajos invalidos o duplicados desasignados.\n",i+1,repaired);
+            }
 
             // Monitor
             if (const auto it = values.find(prefix + "monitor_index"); it != values.end())
@@ -593,11 +575,33 @@ namespace GUI
 
             loaded.esp_render_distance = std::clamp(loaded.esp_render_distance, 1000.0f, 55000.0f);
             loaded.esp_box_distance = std::clamp(loaded.esp_box_distance, 500.0f, 3500.0f);
-            loaded.xray_render_mode = std::clamp(loaded.xray_render_mode, 0, 2);
+            loaded.esp_invul_distance = std::clamp(loaded.esp_invul_distance, 100.f, 3500.f);
             loaded.menu_style = std::clamp(loaded.menu_style, 0, 6);
             loaded.esp_vsync_fps = std::clamp(loaded.esp_vsync_fps, 30, 500);
             loaded.death_state_threshold = std::clamp(loaded.death_state_threshold, 1, 2);
             loaded.air_lead_weapon_selection = std::clamp(loaded.air_lead_weapon_selection, -1, 20);
+            loaded.projectile_incoming_distance = std::clamp(loaded.projectile_incoming_distance, 500.0f, 8000.0f);
+            loaded.projectile_incoming_angle = std::clamp(loaded.projectile_incoming_angle, 5.0f, 60.0f);
+            loaded.projectile_scan_budget = std::clamp(loaded.projectile_scan_budget, 256, 4096);
+            loaded.air_lead_opacity = std::clamp(loaded.air_lead_opacity, 0.0f, 1.0f);
+            loaded.air_lead_marker_size=std::clamp(loaded.air_lead_marker_size,2.f,15.f);
+            loaded.air_lead_line_thickness=std::clamp(loaded.air_lead_line_thickness,.5f,3.f);
+            loaded.air_lead_smooth_min_alpha=std::clamp(loaded.air_lead_smooth_min_alpha,.05f,.95f);
+            loaded.air_lead_smooth_max_alpha=std::clamp(loaded.air_lead_smooth_max_alpha,.05f,.95f);
+            if(loaded.air_lead_smooth_min_alpha>loaded.air_lead_smooth_max_alpha)
+                std::swap(loaded.air_lead_smooth_min_alpha,loaded.air_lead_smooth_max_alpha);
+            loaded.air_lead_extra_time=std::clamp(loaded.air_lead_extra_time,0.f,.5f);
+            loaded.xray_small_module_distance=std::clamp(loaded.xray_small_module_distance,50.f,2000.f);
+            loaded.xray_line_thickness=std::clamp(loaded.xray_line_thickness,.2f,3.f);
+            loaded.xray_module_alpha=std::clamp(loaded.xray_module_alpha,0.f,1.f);
+            loaded.xray_render_distance=std::clamp(loaded.xray_render_distance,100.f,5000.f);
+            loaded.xray_names_distance=std::clamp(loaded.xray_names_distance,100.f,5000.f);
+            loaded.esp_font_size_name=std::clamp(loaded.esp_font_size_name,8.f,36.f);
+            loaded.esp_font_size_distance=std::clamp(loaded.esp_font_size_distance,8.f,36.f);
+            loaded.esp_font_size_reload=std::clamp(loaded.esp_font_size_reload,8.f,36.f);
+            loaded.esp_font_size_invul=std::clamp(loaded.esp_font_size_invul,8.f,18.f);
+            loaded.esp_font_size_module=std::clamp(loaded.esp_font_size_module,8.f,36.f);
+            loaded.menu_ui_scale = std::clamp(loaded.menu_ui_scale, 0.8f, 1.5f);
             presets[i] = loaded;
         }
 
@@ -618,6 +622,7 @@ namespace GUI
 
     void append_presets_to_stream(std::ostream& output)
     {
+        output << std::setprecision(std::numeric_limits<float>::max_digits10);
         // Serialize the live active profile without modifying the UI/profile state.
         auto saved_presets = presets;
         const int selected = std::clamp(active_preset, 0, static_cast<int>(saved_presets.size()) - 1);
@@ -631,6 +636,8 @@ namespace GUI
             preset.auto_fullscreen_on_start = sdk::auto_fullscreen_on_start;
         }
         output << "active_preset=" << selected << '\n';
+        // Catalogo observado: archivo automatico independiente junto al EXE.
+        // Conservamos lectura de configs antiguas para migrarlo sin perder nombres.
 
         for (int i = 0; i < static_cast<int>(saved_presets.size()); ++i)
         {
@@ -638,6 +645,21 @@ namespace GUI
             const std::string prefix = "preset" + std::to_string(i + 1) + "_";
 
             output << prefix << "name=" << p.name << '\n';
+            output << prefix << "projectile_esp_enabled=" << (p.projectile_esp_enabled ? 1 : 0) << '\n';
+            output << prefix << "projectile_debug=" << (p.projectile_debug ? 1 : 0) << '\n';
+            output << prefix << "projectile_incoming_only=" << (p.projectile_incoming_only ? 1 : 0) << '\n';
+            output << prefix << "projectile_incoming_use_localplayer=" << (p.projectile_incoming_use_localplayer ? 1 : 0) << '\n';
+            output << prefix << "projectile_aam_only=" << (p.projectile_aam_only ? 1 : 0) << '\n';
+            for (std::size_t j=0;j<p.radar_kinds.size();++j)
+                output << prefix << "radar_kind_" << j << '=' << (p.radar_kinds[j]?1:0) << '\n';
+            output << prefix << "missile_count=" << p.missile_overrides.size() << '\n';
+            std::size_t missile_index=0;
+            for (const auto& [name,enabled] : p.missile_overrides)
+                output << prefix << "missile_" << missile_index++ << '='
+                    << projectile_visibility::hex_encode(name) << ':' << (enabled?1:0) << '\n';
+            output << prefix << "projectile_incoming_distance=" << p.projectile_incoming_distance << '\n';
+            output << prefix << "projectile_incoming_angle=" << p.projectile_incoming_angle << '\n';
+            output << prefix << "projectile_scan_budget=" << p.projectile_scan_budget << '\n';
 
             output << prefix << "esp_enabled=" << (p.esp_enabled ? 1 : 0) << '\n';
             output << prefix << "radar_enabled=" << (p.radar_enabled ? 1 : 0) << '\n';
@@ -649,6 +671,9 @@ namespace GUI
             output << prefix << "esp_show_vehicle_names=" << (p.esp_show_vehicle_names ? 1 : 0) << '\n';
             output << prefix << "esp_show_distance=" << (p.esp_show_distance ? 1 : 0) << '\n';
             output << prefix << "esp_show_reload=" << (p.esp_show_reload ? 1 : 0) << '\n';
+            output << prefix << "esp_show_invulnerable=" << (p.esp_show_invulnerable ? 1 : 0) << '\n';
+            output << prefix << "esp_invul_show_timer=" << (p.esp_invul_show_timer ? 1 : 0) << '\n';
+            output << prefix << "esp_invul_distance=" << p.esp_invul_distance << '\n';
             output << prefix << "esp_show_reload_seconds=" << (p.esp_show_reload_seconds ? 1 : 0) << '\n';
             output << prefix << "esp_show_fps=" << (p.esp_show_fps ? 1 : 0) << '\n';
             output << prefix << "esp_show_bomb_impact=" << (p.esp_show_bomb_impact ? 1 : 0) << '\n';
@@ -687,11 +712,10 @@ namespace GUI
             write_color("color_torpedo_boat", p.color_torpedo_boat);
             write_color("color_recon_drone", p.color_recon_drone);
             write_color("radar_enemy_color", p.radar_enemy_color);
+            write_color("color_invulnerable", p.color_invulnerable);
 
             output << prefix << "bShowDamageModel=" << (p.bShowDamageModel ? 1 : 0) << '\n';
             output << prefix << "bShowModuleNames=" << (p.bShowModuleNames ? 1 : 0) << '\n';
-            output << prefix << "xray_render_mode=" << p.xray_render_mode << '\n';
-            output << prefix << "xray_wireframe_overlay=" << (p.xray_wireframe_overlay ? 1 : 0) << '\n';
             output << prefix << "bShowModuleGunBarrel=" << (p.bShowModuleGunBarrel ? 1 : 0) << '\n';
             output << prefix << "bShowModuleCannonBreech=" << (p.bShowModuleCannonBreech ? 1 : 0) << '\n';
             output << prefix << "bShowModuleCrew=" << (p.bShowModuleCrew ? 1 : 0) << '\n';
@@ -716,6 +740,9 @@ namespace GUI
             output << prefix << "air_lead_enabled=" << (p.air_lead_enabled ? 1 : 0) << '\n';
             output << prefix << "air_lead_use_simulation=" << (p.air_lead_use_simulation ? 1 : 0) << '\n';
             write_color("air_lead_sim_color", p.air_lead_sim_color);
+            output << prefix << "air_lead_opacity=" << p.air_lead_opacity << '\n';
+            output << prefix << "air_lead_coverage_opacity=" << (p.air_lead_coverage_opacity ? 1 : 0) << '\n';
+            output << prefix << "menu_ui_scale=" << p.menu_ui_scale << '\n';
             output << prefix << "air_lead_marker_size=" << p.air_lead_marker_size << '\n';
             output << prefix << "air_lead_line_thickness=" << p.air_lead_line_thickness << '\n';
             output << prefix << "air_lead_use_weapon_position=" << (p.air_lead_use_weapon_position ? 1 : 0) << '\n';
@@ -740,6 +767,7 @@ namespace GUI
             output << prefix << "esp_font_size_name=" << p.esp_font_size_name << '\n';
             output << prefix << "esp_font_size_distance=" << p.esp_font_size_distance << '\n';
             output << prefix << "esp_font_size_reload=" << p.esp_font_size_reload << '\n';
+            output << prefix << "esp_font_size_invul=" << p.esp_font_size_invul << '\n';
             output << prefix << "esp_font_size_module=" << p.esp_font_size_module << '\n';
 
             output << prefix << "xray_toggle_key=" << p.xray_toggle_key << '\n';
@@ -764,6 +792,8 @@ namespace GUI
         menu_preset_t current;
         std::array<menu_preset_t, 5> saved_presets;
         int selected = 0;
+        int entity_interval = 0;
+        int frame_interval = 0;
     };
 
     bool same_preset(const menu_preset_t& a, const menu_preset_t& b)
@@ -780,16 +810,20 @@ namespace GUI
             const ImVec4& y = b.*(binding.preset);
             if (x.x != y.x || x.y != y.y || x.z != y.z || x.w != y.w) return false;
         }
-        return a.monitor_index == b.monitor_index && a.name == b.name;
+        return a.monitor_index == b.monitor_index && a.name == b.name &&
+            a.missile_overrides == b.missile_overrides && a.radar_kinds == b.radar_kinds;
     }
 
     settings_snapshot_t snapshot_settings()
     {
-        return { capture_current_settings(), presets, active_preset };
+        return { capture_current_settings(), presets, active_preset,
+            core::entity_update_interval_ms.load(), core::frame_update_interval_ms.load() };
     }
 
     bool same_settings(const settings_snapshot_t& a, const settings_snapshot_t& b)
     {
+        if (a.entity_interval != b.entity_interval ||
+            a.frame_interval != b.frame_interval) return false;
         if (a.selected != b.selected || !same_preset(a.current, b.current)) return false;
         for (size_t i = 0; i < a.saved_presets.size(); ++i)
             if (!same_preset(a.saved_presets[i], b.saved_presets[i])) return false;
@@ -798,46 +832,45 @@ namespace GUI
 
     enum class save_status_t { saved, pending, error };
     save_status_t save_status = save_status_t::saved;
-    settings_snapshot_t last_observed;
-    bool autosave_ready = false;
-    std::chrono::steady_clock::time_point next_save_time;
+    settings_snapshot_t last_saved;
+    bool save_tracking_ready = false;
 
-    void initialize_autosave()
+    void initialize_save_state()
     {
-        last_observed = snapshot_settings();
-        autosave_ready = true;
+        last_saved = snapshot_settings();
+        save_tracking_ready = true;
         save_status = save_status_t::saved;
     }
 
     bool save_now()
     {
+        sync_active_preset_from_runtime();
         const bool saved = config::save();
         if (saved)
         {
-            last_observed = snapshot_settings();
+            last_saved = snapshot_settings();
             save_status = save_status_t::saved;
         }
         else
         {
             save_status = save_status_t::error;
-            next_save_time = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         }
         return saved;
     }
 
-    void update_autosave()
+    void update_unsaved_indicator()
     {
-        if (!autosave_ready) return;
-        const auto now = std::chrono::steady_clock::now();
-        const auto current = snapshot_settings();
-        if (!same_settings(current, last_observed))
-        {
-            last_observed = current;
-            save_status = save_status_t::pending;
-            next_save_time = now + std::chrono::seconds(1);
-        }
-        if (save_status != save_status_t::saved && now >= next_save_time)
-            save_now();
+        if (!save_tracking_ready || save_status == save_status_t::error) return;
+        // snapshot_settings copia configuración/colecciones: no hacerlo a cada
+        // frame cuando el menú está oculto. Con menú visible sigue inmediato.
+        static auto next_hidden_check=std::chrono::steady_clock::time_point{};
+        if (!menu_open) {
+            const auto now=std::chrono::steady_clock::now();
+            if (now<next_hidden_check) return;
+            next_hidden_check=now+std::chrono::milliseconds(100);
+        } else next_hidden_check={};
+        save_status = same_settings(snapshot_settings(), last_saved)
+            ? save_status_t::saved : save_status_t::pending;
     }
 
     bool ExportConfig(const std::string& filepath)
@@ -864,507 +897,17 @@ namespace GUI
             if (pos != std::string::npos)
                 values[line.substr(0, pos)] = line.substr(pos + 1);
         }
+        if (!values.contains("active_preset") || !values.contains("preset1_esp_enabled")) {
+            configuration_warning="Importación rechazada: faltan datos esenciales del perfil.";
+            return false;
+        }
         load_presets_from_map(values);
         apply_preset(presets[active_preset]);
-        save_now();
+        // Importar sólo cambia la sesión; Guardar persiste los cambios.
         return true;
     }
 
-    void DrawKeybindRow(const char* label, int& key, bool* waiting = nullptr)
-    {
-        ImGui::PushID(label);
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("%s", label);
-        ImGui::SameLine(120);
-        static std::unordered_map<int, bool> waiting_map;
-        if (waiting == nullptr) waiting = &waiting_map[key];
-
-        if (*waiting)
-        {
-            ImGui::Button("Press any key...");
-            for (int k = 0; k < 256; k++)
-            {
-                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(k)))
-                {
-                    key = k;
-                    *waiting = false;
-                    break;
-                }
-            }
-            for (int mb = 0; mb < 3; mb++)
-            {
-                if (ImGui::IsMouseClicked(mb))
-                {
-                    key = (mb == 0) ? VK_LBUTTON : (mb == 1) ? VK_RBUTTON : VK_MBUTTON;
-                    *waiting = false;
-                    break;
-                }
-            }
-        }
-        else
-        {
-            if (ImGui::Button("Set Key")) *waiting = true;
-        }
-        ImGui::SameLine();
-        const char* name = "None";
-        if (key == VK_LBUTTON) name = "LButton";
-        else if (key == VK_RBUTTON) name = "RButton";
-        else if (key == VK_MBUTTON) name = "MButton";
-        else if (key > 0 && key < 256) {
-            static char buf[2] = { 0 };
-            buf[0] = (char)key;
-            name = buf;
-        }
-        ImGui::Text("%s", name);
-        ImGui::PopID();
-    }
-
-    void OnRender()
-    {
-        if (!menu_open) return;
-
-        ImGui::SetNextWindowSize(ImVec2(820, 640), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowPos(ImVec2(100, 100), ImGuiCond_FirstUseEver);
-
-        if (ImGui::Begin("DMA Cheat - War Thunder 2.59.0.54", &menu_open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar))
-        {
-            if (ImGui::BeginMenuBar())
-            {
-                if (ImGui::BeginMenu("File"))
-                {
-                    if (ImGui::MenuItem("Export Config..."))
-                    {
-                        OPENFILENAMEA ofn = { sizeof(OPENFILENAMEA) };
-                        char file[260] = "cheat_config.cfg";
-                        ofn.lpstrFile = file;
-                        ofn.nMaxFile = 260;
-                        ofn.lpstrFilter = "Config Files (*.cfg)\0*.cfg\0All Files (*.*)\0*.*\0";
-                        ofn.Flags = OFN_OVERWRITEPROMPT;
-                        if (GetSaveFileNameA(&ofn)) ExportConfig(file);
-                    }
-                    if (ImGui::MenuItem("Import Config..."))
-                    {
-                        OPENFILENAMEA ofn = { sizeof(OPENFILENAMEA) };
-                        char file[260] = "";
-                        ofn.lpstrFile = file;
-                        ofn.nMaxFile = 260;
-                        ofn.lpstrFilter = "Config Files (*.cfg)\0*.cfg\0All Files (*.*)\0*.*\0";
-                        ofn.Flags = OFN_FILEMUSTEXIST;
-                        if (GetOpenFileNameA(&ofn)) ImportConfig(file);
-                    }
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Close Menu")) menu_open = false;
-                    ImGui::EndMenu();
-                }
-                ImGui::EndMenuBar();
-            }
-
-            if (ImGui::BeginTabBar("MainTabs"))
-            {
-                // ESP tab
-                if (ImGui::BeginTabItem("ESP"))
-                {
-                    if (ImGui::BeginTabBar("ESP Sections"))
-                    {
-                        if (ImGui::BeginTabItem("General"))
-                        {
-                            ImGui::Checkbox("Enable ESP", &sdk::esp_enabled);
-                            ImGui::SameLine();
-                            ImGui::Checkbox("Show FPS", &sdk::esp_show_fps);
-                            ImGui::SeparatorText("Perfil (ms por fotograma)");
-                            {
-                                const double frame_ms = misc::prof_main_frame_us.load() / 1000.0;
-                                ImGui::Text("Frame %.2f ms  |  %.0f FPS", frame_ms,
-                                    frame_ms > 0.0 ? 1000.0 / frame_ms : 0.0);
-                                ImGui::Text("Snapshot %.2f  ESP %.2f  Aimbot %.2f",
-                                    misc::prof_update_frame_us.load() / 1000.0,
-                                    misc::prof_esp_us.load() / 1000.0,
-                                    misc::prof_aimbot_us.load() / 1000.0);
-                                ImGui::Text("Edad snapshot %.2f ms  |  w2s %llu  obb %llu",
-                                    misc::prof_snapshot_age_us.load() / 1000.0,
-                                    static_cast<unsigned long long>(misc::prof_esp_w2s_calls.load()),
-                                    static_cast<unsigned long long>(misc::prof_esp_obb_calls.load()));
-                                ImGui::Text("Projectile %.2f ms  (presupuesto %d reads)",
-                                    misc::prof_projectile_us.load() / 1000.0,
-                                    sdk::projectile_scan_budget);
-                            }
-                            ImGui::Checkbox("Only Show Planes", &sdk::esp_only_show_planes);
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("Oculta todo lo que no sea aereo: terrestre, naval y estructuras.");
-                            ImGui::Checkbox("Show Bomb Impact", &sdk::esp_show_bomb_impact);
-                            ImGui::Checkbox("Live Projectile ESP (experimental ECS)", &sdk::projectile_esp_enabled);
-                            ImGui::Checkbox("Projectile Debug", &sdk::projectile_debug);
-                            ImGui::SliderInt("Missile Scan Budget", &sdk::projectile_scan_budget, 256, 4096, "%d reads");
-                            ImGui::Checkbox("Only Air-to-Air Missiles (AAM)", &sdk::projectile_aam_only);
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("Dibuja unicamente misiles aire-aire (familias AAM por nombre).\nDescarta aire-tierra, antiradiacion, bombas, cohetes y bengalas.\nSi falta un misil, mira notaamname= en el log de debug.");
-                            ImGui::Checkbox("Only Incoming Missiles", &sdk::projectile_incoming_only);
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("Solo dibuja misiles que vienen hacia ti (cierre + cono).\nLas bengalas se descartan siempre por nombre.");
-                            if (sdk::projectile_incoming_only)
-                            {
-                                ImGui::Checkbox("Use Confirmed Local Player", &sdk::projectile_incoming_use_localplayer);
-                                if (ImGui::IsItemHovered())
-                                    ImGui::SetTooltip("Usa el jugador local confirmado del snapshot (el mismo del radar/aimbot).\nSi no esta disponible, cae a la lectura directa.");
-                                ImGui::SliderFloat("Incoming Distance", &sdk::projectile_incoming_distance, 500.0f, 8000.0f, "%.0f m");
-                                ImGui::SliderFloat("Incoming Angle", &sdk::projectile_incoming_angle, 5.0f, 60.0f, "%.0f deg");
-                            }
-                            ImGui::SliderFloat("Render Distance", &sdk::esp_render_distance, 1000.f, 55000.f, "%.0f m");
-                            ImGui::SliderFloat("Box Distance", &sdk::esp_box_distance, 500.f, 3500.f, "%.0f m");
-
-                            ImGui::SeparatorText("Boxes");
-                            ImGui::Checkbox("2D Box", &sdk::esp_show_boxes);
-                            ImGui::SameLine();
-                            ImGui::Checkbox("3D Box", &sdk::esp_use_3d_boxes);
-
-                            ImGui::SeparatorText("Labels");
-                            ImGui::Checkbox("Vehicle Names", &sdk::esp_show_vehicle_names);
-                            ImGui::SameLine();
-                            ImGui::Checkbox("Distance", &sdk::esp_show_distance);
-                            ImGui::Checkbox("Reload Progress", &sdk::esp_show_reload);
-                            ImGui::SameLine();
-                            ImGui::Checkbox("Seconds", &sdk::esp_show_reload_seconds);
-
-                            ImGui::SeparatorText("Font Sizes");
-                            ImGui::SliderFloat("Name Size", &sdk::esp_font_size_name, 8.0f, 36.0f, "%.0f");
-                            ImGui::SliderFloat("Distance Size", &sdk::esp_font_size_distance, 8.0f, 36.0f, "%.0f");
-                            ImGui::SliderFloat("Reload Size", &sdk::esp_font_size_reload, 8.0f, 36.0f, "%.0f");
-                            ImGui::SliderFloat("Module Name Size", &sdk::esp_font_size_module, 8.0f, 36.0f, "%.0f");
-
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Vehicles"))
-                        {
-                            ImGui::TextDisabled("Los colores se configuran en la pestaña Colors.");
-                            const auto draw_vehicle_row = [](const char* label, bool* enabled)
-                                {
-                                    ImGui::PushID(label);
-                                    ImGui::Checkbox(label, enabled);
-                                    ImGui::PopID();
-                                };
-                            draw_vehicle_row("Helicopter", &sdk::show_helicopter);
-                            draw_vehicle_row("Bomber", &sdk::show_bomber);
-                            draw_vehicle_row("Fighter", &sdk::show_fighter);
-                            draw_vehicle_row("Attacker", &sdk::show_attacker);
-                            draw_vehicle_row("Recon Drone", &sdk::show_recon_drone);
-                            draw_vehicle_row("Light Tank", &sdk::show_light_tank);
-                            draw_vehicle_row("Heavy Tank", &sdk::show_heavy_tank);
-                            draw_vehicle_row("Medium Tank", &sdk::show_medium_tank);
-                            draw_vehicle_row("SPAA", &sdk::show_spaa);
-                            draw_vehicle_row("Gun Boat", &sdk::show_gun_boat);
-                            draw_vehicle_row("Destroyer", &sdk::show_destroyer);
-                            draw_vehicle_row("Cruiser", &sdk::show_cruiser);
-                            draw_vehicle_row("Torpedo Boat", &sdk::show_torpedo_boat);
-
-                            ImGui::SeparatorText("Filter");
-                            ImGui::SliderInt("Death State Threshold", &sdk::death_state_threshold, 1, 2);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("X-Ray"))
-                        {
-                            ImGui::Text("Damage Model");
-                            ImGui::Checkbox("Enable X-Ray", &sdk::bShowDamageModel);
-                            ImGui::SameLine();
-                            ImGui::Checkbox("Module Names", &sdk::bShowModuleNames);
-                            ImGui::Combo("Render Mode", &sdk::xray_render_mode, "Wireframe\0Solid\0Surface\0");
-                            ImGui::Checkbox("Wireframe Overlay", &sdk::xray_wireframe_overlay);
-
-                            ImGui::SeparatorText("Module Visibility");
-                            ImGui::Checkbox("Gun Barrel", &sdk::bShowModuleGunBarrel); ImGui::SameLine();
-                            ImGui::Checkbox("Cannon Breech", &sdk::bShowModuleCannonBreech);
-                            ImGui::Checkbox("Crew", &sdk::bShowModuleCrew); ImGui::SameLine();
-                            ImGui::Checkbox("Fuel Tank", &sdk::bShowModuleFuelTank);
-                            ImGui::Checkbox("Ammo Rack", &sdk::bShowModuleAmmoRack); ImGui::SameLine();
-                            ImGui::Checkbox("Engine", &sdk::bShowModuleEngine);
-                            ImGui::Checkbox("Transmission", &sdk::bShowModuleTransmission);
-
-                            ImGui::SliderFloat("Hide small modules >", &sdk::xray_small_module_distance, 50.0f, 2000.0f, "%.0f m");
-                            ImGui::SliderFloat("Line Thickness", &sdk::xray_line_thickness, 0.2f, 3.0f, "%.1f");
-                            ImGui::SliderFloat("Module Alpha", &sdk::xray_module_alpha, 0.0f, 1.0f, "%.2f");
-                            {
-                                static int xd = (int)sdk::xray_render_distance, nd = (int)sdk::xray_names_distance;
-                                xd = (int)sdk::xray_render_distance; nd = (int)sdk::xray_names_distance;
-                                ImGui::SliderInt("X-Ray Distance", &xd, 100, 5000, "%d m"); sdk::xray_render_distance = (float)xd;
-                                ImGui::SliderInt("Names Distance", &nd, 100, 5000, "%d m"); sdk::xray_names_distance = (float)nd;
-                            }
-                            ImGui::TextDisabled("Colores de modulos en Colors > X-Ray.");
-                            ImGui::EndTabItem();
-                        }
-                        ImGui::EndTabBar();
-                    }
-                    ImGui::EndTabItem();
-                }
-
-                // Radar: sin sliders; usa la geometria nativa del mapa.
-                if (ImGui::BeginTabItem("Radar"))
-                {
-                    ImGui::Checkbox("Enable Radar", &sdk::radar_enabled);
-                    ImGui::TextDisabled("Marcadores enemigos sobre minimapa y mapa tactico.");
-                    ImGui::TextDisabled("La lista de entidades actual excluye aliados.");
-                    ImGui::EndTabItem();
-                }
-
-                // Aimbot tab
-                if (ImGui::BeginTabItem("Aimbot"))
-                {
-                    if (ImGui::BeginTabBar("Aimbot Sections"))
-                    {
-                        if (ImGui::BeginTabItem("Ground"))
-                        {
-                            ImGui::Checkbox("Enable Aimbot", &sdk::aimbot_enabled);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Air Lead"))
-                        {
-                            ImGui::Text("Air Lead Indicator");
-                            ImGui::Checkbox("Enable Air Lead", &sdk::air_lead_enabled);
-                            ImGui::Checkbox("Use Simulation", &sdk::air_lead_use_simulation);
-                            ImGui::Checkbox("Turn Prediction (3D)", &sdk::air_lead_use_turn_prediction);
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("Modela el giro del objetivo con su aceleracion normal.\nNecesita que la aceleracion se lea bien; si no, deja solo Use Simulation.");
-                            ImGui::Checkbox("Adaptive Smoothing", &sdk::air_lead_smooth_adaptive);
-                            if (sdk::air_lead_smooth_adaptive)
-                            {
-                                ImGui::SliderFloat("Smooth Min Alpha", &sdk::air_lead_smooth_min_alpha, 0.05f, 0.95f, "%.2f");
-                                ImGui::SliderFloat("Smooth Max Alpha", &sdk::air_lead_smooth_max_alpha, 0.05f, 0.95f, "%.2f");
-                            }
-                            ImGui::Checkbox("Only Target (center)", &sdk::air_lead_only_target);
-                            ImGui::TextDisabled("Color del indicador en Colors > Air Lead.");
-                            ImGui::SliderFloat("Marker Size", &sdk::air_lead_marker_size, 2.0f, 15.0f, "%.1f");
-                            ImGui::SliderFloat("Line Thickness", &sdk::air_lead_line_thickness, 0.5f, 3.0f, "%.1f");
-
-                            ImGui::SeparatorText("Air Lead Extra");
-                            ImGui::SliderFloat("Extra Lead Time (s)", &sdk::air_lead_extra_time, 0.0f, 0.5f, "%.2f");
-
-                            ImGui::SeparatorText("Air Lead Targets");
-                            ImGui::Checkbox("Helicopters", &sdk::air_lead_target_helicopter);
-                            ImGui::Checkbox("Recon Drones", &sdk::air_lead_target_recon_drone);
-                            ImGui::Checkbox("Fighters", &sdk::air_lead_target_fighter);
-                            ImGui::Checkbox("Bombers", &sdk::air_lead_target_bomber);
-                            ImGui::Checkbox("Attackers", &sdk::air_lead_target_attacker);
-                            ImGui::EndTabItem();
-                        }
-                        ImGui::EndTabBar();
-                    }
-                    ImGui::EndTabItem();
-                }
-
-                // Todos los colores editables reunidos por categoria.
-                if (ImGui::BeginTabItem("Colors"))
-                {
-                    if (ImGui::BeginTabBar("Color Sections"))
-                    {
-                        if (ImGui::BeginTabItem("Aircraft"))
-                        {
-                            ImGui::ColorEdit4("Helicopter", (float*)&sdk::color_helicopter);
-                            ImGui::ColorEdit4("Bomber", (float*)&sdk::color_bomber);
-                            ImGui::ColorEdit4("Fighter", (float*)&sdk::color_fighter);
-                            ImGui::ColorEdit4("Attacker", (float*)&sdk::color_attacker);
-                            ImGui::ColorEdit4("Recon Drone", (float*)&sdk::color_recon_drone);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Ground"))
-                        {
-                            ImGui::ColorEdit4("Light Tank", (float*)&sdk::color_light_tank);
-                            ImGui::ColorEdit4("Heavy Tank", (float*)&sdk::color_heavy_tank);
-                            ImGui::ColorEdit4("Medium Tank", (float*)&sdk::color_medium_tank);
-                            ImGui::ColorEdit4("SPAA", (float*)&sdk::color_spaa);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Naval"))
-                        {
-                            ImGui::ColorEdit4("Gun Boat", (float*)&sdk::color_gun_boat);
-                            ImGui::ColorEdit4("Destroyer", (float*)&sdk::color_destroyer);
-                            ImGui::ColorEdit4("Cruiser", (float*)&sdk::color_cruiser);
-                            ImGui::ColorEdit4("Torpedo Boat", (float*)&sdk::color_torpedo_boat);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("X-Ray"))
-                        {
-                            ImGui::ColorEdit4("Gun Barrel", (float*)&sdk::color_mod_gun_barrel);
-                            ImGui::ColorEdit4("Cannon Breech", (float*)&sdk::color_mod_cannon_breech);
-                            ImGui::ColorEdit4("Crew", (float*)&sdk::color_mod_crew);
-                            ImGui::ColorEdit4("Fuel Tank", (float*)&sdk::color_mod_fuel_tank);
-                            ImGui::ColorEdit4("Ammo Rack", (float*)&sdk::color_mod_ammo_rack);
-                            ImGui::ColorEdit4("Engine", (float*)&sdk::color_mod_engine);
-                            ImGui::ColorEdit4("Transmission", (float*)&sdk::color_mod_transmission);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Radar"))
-                        {
-                            ImGui::ColorEdit4("Enemy Marker", (float*)&sdk::radar_enemy_color);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Air Lead"))
-                        {
-                            ImGui::ColorEdit4("Marker", (float*)&sdk::air_lead_sim_color);
-                            ImGui::EndTabItem();
-                        }
-                        ImGui::EndTabBar();
-                    }
-                    ImGui::EndTabItem();
-                }
-
-                // Profiles tab
-                if (ImGui::BeginTabItem("Profiles"))
-                {
-                    ImGui::Text("Active Profile: %d", active_preset + 1);
-                    static char name_buf[5][64] = {};
-                    static bool initialized = false;
-                    if (!initialized) {
-                        for (int i = 0; i < 5; i++) {
-                            strncpy_s(name_buf[i], sizeof(name_buf[i]), presets[i].name.c_str(), sizeof(name_buf[i]) - 1);
-                            name_buf[i][sizeof(name_buf[i]) - 1] = '\0';
-                        }
-                        initialized = true;
-                    }
-                    for (int i = 0; i < 5; i++) {
-                        ImGui::PushID(i);
-                        ImGui::SetNextItemWidth(150);
-                        if (ImGui::InputText("##name", name_buf[i], IM_ARRAYSIZE(name_buf[i])))
-                            presets[i].name = name_buf[i];
-                        if (!ImGui::IsItemActive() && presets[i].name != name_buf[i])
-                            strncpy_s(name_buf[i], sizeof(name_buf[i]), presets[i].name.c_str(), _TRUNCATE);
-                        ImGui::SameLine();
-                        if (ImGui::Button("Load")) {
-                            if (i != active_preset) sync_active_preset_from_runtime();
-                            presets[i].name = name_buf[i];
-                            active_preset = i;
-                            apply_preset(presets[i]);
-                            save_now();
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Save")) {
-                            presets[i] = capture_current_settings();
-                            presets[i].name = name_buf[i];
-                            save_now();
-                        }
-                        ImGui::SameLine();
-                        ImGui::Text("%s", (active_preset == i) ? "[Active]" : " ");
-                        ImGui::PopID();
-                    }
-                    ImGui::EndTabItem();
-                }
-
-                // Settings tab
-                if (ImGui::BeginTabItem("Settings"))
-                {
-                    if (ImGui::BeginTabBar("Settings Sections"))
-                    {
-                        if (ImGui::BeginTabItem("Video & Monitor"))
-                        {
-                            int safe_monitor_index = sdk::monitor_index;
-                            if (sdk::monitor_count <= 0) safe_monitor_index = 0;
-                            else { if (safe_monitor_index < 0) safe_monitor_index = 0; if (safe_monitor_index > sdk::monitor_count - 1) safe_monitor_index = sdk::monitor_count - 1; }
-                            sdk::monitor_index = safe_monitor_index;
-
-                            const char* preview = "Unknown monitor";
-                            if (!sdk::monitor_labels.empty() && safe_monitor_index < (int)sdk::monitor_labels.size())
-                                preview = sdk::monitor_labels[safe_monitor_index].c_str();
-                            if (ImGui::BeginCombo("Monitor", preview))
-                            {
-                                for (int i = 0; i < (int)sdk::monitor_labels.size(); ++i)
-                                {
-                                    const bool is_selected = (sdk::monitor_index == i);
-                                    if (ImGui::Selectable(sdk::monitor_labels[i].c_str(), is_selected))
-                                    {
-                                        sdk::monitor_index = i;
-                                        sync_shared_settings_to_all_presets();
-                                    }
-                                    if (is_selected) ImGui::SetItemDefaultFocus();
-                                }
-                                ImGui::EndCombo();
-                            }
-                            if (ImGui::Button("Apply Fullscreen to Monitor")) sdk::request_monitor_apply = true;
-                            if (ImGui::Checkbox("Apply Fullscreen on Start", &sdk::auto_fullscreen_on_start))
-                            {
-                                sync_shared_settings_to_all_presets();
-                            }
-                            ImGui::SeparatorText("Video");
-                            ImGui::Checkbox("V-Sync", &sdk::esp_vsync_enabled);
-                            ImGui::SetNextItemWidth(135);
-                            if (ImGui::InputInt("Target FPS", &sdk::esp_vsync_fps))
-                                sdk::esp_vsync_fps = std::clamp(sdk::esp_vsync_fps, 30, 500);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Hotkeys"))
-                        {
-                            ImGui::SeparatorText("ESP");
-                            DrawKeybindRow("Toggle ESP", sdk::key_esp_enable);
-                            DrawKeybindRow("2D Box", sdk::key_2d_box);
-                            DrawKeybindRow("3D Box", sdk::key_3d_box);
-                            DrawKeybindRow("Vehicle Name", sdk::key_vehicle_name);
-                            DrawKeybindRow("Distance", sdk::key_distance);
-                            ImGui::SeparatorText("X-Ray");
-                            DrawKeybindRow("Toggle X-Ray", sdk::xray_toggle_key);
-                            DrawKeybindRow("Show Crew", sdk::key_show_crew);
-                            DrawKeybindRow("Show Barrel", sdk::key_show_barrel);
-                            DrawKeybindRow("Show AmmoRack", sdk::key_show_ammorack);
-                            DrawKeybindRow("Show Fueltank", sdk::key_show_fueltank);
-                            ImGui::SeparatorText("Aimbot");
-                            DrawKeybindRow("Toggle Aimbot", sdk::key_aimbot_enable);
-                            DrawKeybindRow("Toggle Air Lead", sdk::key_air_lead_enable);
-                            ImGui::TextDisabled("Menu: F1 | Profiles: F2");
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Appearance"))
-                        {
-                            ImGui::Combo("Theme", &sdk::menu_style, "Dark\0Classic\0Crimson\0Midnight\0Minimal Light\0Forest\0Ocean\0");
-                            ApplyMenuStyle(sdk::menu_style);
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Offsets"))
-                        {
-                            if (ImGui::Button("Create offsets.txt")) offsets::create_or_update_external_offsets_file();
-                            ImGui::SameLine();
-                            bool external = offsets::is_external_offsets_enabled();
-                            if (ImGui::Checkbox("Read offsets.txt", &external)) {
-                                offsets::set_external_offsets_enabled(external);
-                                sdk::request_manual_reload = true;
-                            }
-                            ImGui::EndTabItem();
-                        }
-                        if (ImGui::BeginTabItem("Config"))
-                        {
-                            if (ImGui::Button("Export Config")) {
-                                OPENFILENAMEA ofn = { sizeof(OPENFILENAMEA) };
-                                char file[260] = "cheat_config.cfg";
-                                ofn.lpstrFile = file;
-                                ofn.nMaxFile = 260;
-                                ofn.lpstrFilter = "Config Files (*.cfg)\0*.cfg\0All Files (*.*)\0*.*\0";
-                                ofn.Flags = OFN_OVERWRITEPROMPT;
-                                if (GetSaveFileNameA(&ofn)) ExportConfig(file);
-                            }
-                            ImGui::SameLine();
-                            if (ImGui::Button("Import Config")) {
-                                OPENFILENAMEA ofn = { sizeof(OPENFILENAMEA) };
-                                char file[260] = "";
-                                ofn.lpstrFile = file;
-                                ofn.nMaxFile = 260;
-                                ofn.lpstrFilter = "Config Files (*.cfg)\0*.cfg\0All Files (*.*)\0*.*\0";
-                                ofn.Flags = OFN_FILEMUSTEXIST;
-                                if (GetOpenFileNameA(&ofn)) ImportConfig(file);
-                            }
-
-                            ImGui::Separator();
-                            if (ImGui::Button("Restart")) sdk::request_manual_reload = true;
-                            if (ImGui::Button("Close Menu")) menu_open = false;
-                            ImGui::EndTabItem();
-                        }
-                        ImGui::EndTabBar();
-                    }
-                    ImGui::EndTabItem();
-                }
-
-                ImGui::EndTabBar();
-            }
-            ImGui::Separator();
-            const char* status_text = save_status == save_status_t::saved ? "Guardado"
-                : save_status == save_status_t::pending ? "Pendiente" : "Error";
-            ImGui::TextDisabled("Config: %s", status_text);
-        }
-        ImGui::End();
-    }
+    #include "gui/tactical_menu.hpp"
 }
 
 // ====================== main() and helpers ======================
@@ -1379,12 +922,13 @@ int main(int, char**)
 
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"SDK - ", nullptr };
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"SDK - ", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 720, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowExW(WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP, wc.lpszClassName, L"SDK - ", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 720, nullptr, nullptr, wc.hInstance, nullptr);
     GUI::initialize_presets();
     UpdateCurrentMonitor(hwnd);
+    missile_registry_storage::load(); // solo nombres, nunca modifica la configuracion
     config::load();
     GUI::menu_open = true;
-    GUI::initialize_autosave();
+    GUI::initialize_save_state();
 
     if (!CreateDeviceD3D(hwnd)) { CleanupDeviceD3D(); ::UnregisterClassW(wc.lpszClassName, wc.hInstance); return TRUE; }
     ::ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -1394,9 +938,28 @@ int main(int, char**)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_ViewportsEnable;
+    // El overlay sigue en la swap chain transparente DirectComposition.
+    // El menu usa una HWND ImGui opaca independiente para salir a otro monitor.
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad |
+        ImGuiConfigFlags_DockingEnable;
+    io.ConfigViewportsNoAutoMerge = true; // ventana separada aun sobre el overlay
+    io.ConfigViewportsNoTaskBarIcon = true;
+    io.IniFilename = nullptr; // sin grabar configuracion implicitamente en imgui.ini
 
     ApplyMenuStyle(sdk::menu_style);
+    // Separate menu font: leave the overlay/render fonts unchanged.
+    io.Fonts->AddFontDefault();
+    wchar_t windows_dir[MAX_PATH] = {};
+    if (GetWindowsDirectoryW(windows_dir, MAX_PATH)) {
+        const auto fonts_dir = std::filesystem::path(windows_dir) / "Fonts";
+        // Prefer a readable UI sans-serif; use Bahnschrift when Segoe UI is unavailable.
+        for (const char* name : { "segoeui.ttf", "bahnschrift.ttf", "seguisb.ttf" }) {
+            const auto font_path = fonts_dir / name;
+            if (std::filesystem::exists(font_path) &&
+                (GUI::tactical_font = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f)))
+                break;
+        }
+    }
     ImGuiStyle& style = ImGui::GetStyle();
     style.ScaleAllSizes(main_scale);
     io.ConfigDpiScaleFonts = true;
@@ -1428,19 +991,21 @@ int main(int, char**)
             return pid == ::GetCurrentProcessId();
             }();
 
+        const bool editing_menu = GUI::menu_open && (GUI::tactical_capture != 0 || ImGui::GetIO().WantTextInput ||
+            ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopup));
         const bool f1_down_now = (::GetAsyncKeyState(VK_F1) & 0x8000) != 0;
-        if (is_foreground_process && f1_down_now && !g_F1DownLastFrame) GUI::menu_open = !GUI::menu_open;
+        if (is_foreground_process && !editing_menu && f1_down_now && !g_F1DownLastFrame) GUI::menu_open = !GUI::menu_open;
         g_F1DownLastFrame = f1_down_now;
 
         const bool f2_down_now = (::GetAsyncKeyState(VK_F2) & 0x8000) != 0;
-        if (is_foreground_process && f2_down_now && !g_F2DownLastFrame) { GUI::cycle_preset(); GUI::save_now(); }
+        if (is_foreground_process && !editing_menu && f2_down_now && !g_F2DownLastFrame) { GUI::cycle_preset(); }
         g_F2DownLastFrame = f2_down_now;
 
         if (is_foreground_process)
         {
-            auto check_toggle = [](int key, bool& var, bool& last_state) {
+            auto check_toggle = [editing_menu](int key, bool& var, bool& last_state) {
                 bool down = (::GetAsyncKeyState(key) & 0x8000) != 0;
-                if (down && !last_state) var = !var;
+                if (!editing_menu && down && !last_state) var = !var;
                 last_state = down;
                 };
             static bool last_esp = false, last_aimbot = false, last_air_lead = false,
@@ -1462,19 +1027,28 @@ int main(int, char**)
 
         static bool xray_key_down_last = false;
         bool xray_key_down_now = (::GetAsyncKeyState(sdk::xray_toggle_key) & 0x8000) != 0;
-        if (is_foreground_process && xray_key_down_now && !xray_key_down_last) sdk::bShowDamageModel = !sdk::bShowDamageModel;
+        if (is_foreground_process && !editing_menu && xray_key_down_now && !xray_key_down_last) sdk::bShowDamageModel = !sdk::bShowDamageModel;
         xray_key_down_last = xray_key_down_now;
 
         if (g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) { ::Sleep(10); continue; }
         g_SwapChainOccluded = false;
 
         if (g_ResizeWidth != 0 && g_ResizeHeight != 0) {
+            // A flip-model swap chain cannot resize while its back buffer is
+            // still bound to the immediate context.
+            g_pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
             CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+            const HRESULT resize_hr = g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+            if (FAILED(resize_hr))
+                LOG("[D3D] ResizeBuffers failed: 0x%08X\n", static_cast<unsigned int>(resize_hr));
             g_ResizeWidth = g_ResizeHeight = 0;
             CreateRenderTarget();
         }
+        if (!g_mainRenderTargetView) { ::Sleep(10); continue; }
 
+        // Opt-in: ImGui admite activar/desactivar viewports entre frames.
+        if (sdk::menu_multimonitor_enabled) io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        else io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -1490,12 +1064,28 @@ int main(int, char**)
 
         g_render->draw_list() = ImGui::GetBackgroundDrawList();
         GUI::OnRender();
-        GUI::update_autosave();
+        GUI::update_unsaved_indicator();
+        uint64_t render_snapshot_age_us = 0, render_snapshot_id = 0;
         if (g_render->draw_list())
         {
-            misc::UpdateFrameSnapshot();
-            esp::run();
-            const auto projectile_frame = misc::snapshot_frame();
+            const auto work=render_work_policy::snapshot_demand(core::IsConnected(),
+                sdk::esp_enabled,sdk::projectile_esp_enabled);
+            std::shared_ptr<const misc::frame_snapshot_t> projectile_frame;
+            if(work.frame) {
+                misc::UpdateFrameSnapshot(work.unit_positions);
+                projectile_frame=misc::snapshot_frame();
+            } else {
+                misc::prof_update_frame_us.store(0,std::memory_order_relaxed);
+            }
+            if (projectile_frame) {
+                render_snapshot_id = projectile_frame->frame_id;
+                const auto age = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - projectile_frame->captured_at).count();
+                if (age > 0) render_snapshot_age_us = static_cast<uint64_t>(age);
+            }
+            misc::prof_snapshot_age_us.store(render_snapshot_age_us, std::memory_order_relaxed);
+            misc::prof_snapshot_valid.store(projectile_frame && projectile_frame->frame.valid,std::memory_order_relaxed);
+            esp::run(projectile_frame);
             if (sdk::projectile_esp_enabled && core::IsConnected() && projectile_frame && projectile_frame->frame.valid)
             {
                 misc::scoped_profile_t projectile_profile(misc::prof_projectile_us);
@@ -1504,16 +1094,52 @@ int main(int, char**)
             }
             else
                 projectile_esp::clear_cache();
+
+            // HUD independiente del FPS: el perfil activo se refleja tambien al pulsar F2.
+            if (sdk::esp_enabled) {
+                const ImGuiViewport* viewport = ImGui::GetMainViewport();
+                ImFont* font = g_render->fonts().m_esp;
+                if (viewport && font && viewport->Size.x > 0.0f && viewport->Size.y > 0.0f) {
+                    const int selected = std::clamp(GUI::active_preset, 0,
+                        static_cast<int>(GUI::presets.size()) - 1);
+                    static int cached_profile=-1;
+                    static std::string cached_name, label;
+                    static ImFont* cached_font=nullptr;
+                    static float cached_font_size=0.0f,cached_viewport_width=0.0f;
+                    static ImVec2 text_size{};
+                    const auto& name=GUI::presets[selected].name;
+                    if (selected!=cached_profile || name!=cached_name || font!=cached_font ||
+                        font->LegacySize!=cached_font_size || viewport->Size.x!=cached_viewport_width) {
+                        cached_profile=selected;cached_name=name;cached_font=font;
+                        cached_font_size=font->LegacySize;cached_viewport_width=viewport->Size.x;
+                        label="Perfil: "+name;
+                        text_size=font->CalcTextSizeA(font->LegacySize,
+                            viewport->Size.x,0.0f,label.c_str());
+                    }
+                    const auto top_right = overlay_profile_position::top_right(
+                        viewport->Pos.x, viewport->Pos.y, viewport->Size.x, text_size.x);
+                    g_render->draw_list()->PushClipRect(viewport->Pos,
+                        ImVec2(viewport->Pos.x + viewport->Size.x,
+                               viewport->Pos.y + viewport->Size.y), true);
+                    g_render->draw_list()->AddText(font, font->LegacySize,
+                        ImVec2(top_right.x, top_right.y), IM_COL32(255, 255, 255, 255),
+                        label.c_str());
+                    g_render->draw_list()->PopClipRect();
+                }
+            }
         }
         else
             projectile_esp::clear_cache();
+        missile_registry_storage::flush(); // una escritura por frame con nombres nuevos
 
         ImGui::Render();
         const float clear_color[4] = { 0,0,0,0 };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) { ImGui::UpdatePlatformWindows(); ImGui::RenderPlatformWindowsDefault(); }
+        // Render del menu separado; el ESP siempre queda en la ventana principal.
+        ImGui::UpdatePlatformWindows(); // cierra HWND extra al desactivar
+        if (sdk::menu_multimonitor_enabled) ImGui::RenderPlatformWindowsDefault();
 
         static auto next_vsync = std::chrono::steady_clock::now();
         HRESULT hr = S_OK;
@@ -1535,11 +1161,14 @@ int main(int, char**)
         g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
 
         auto frame_end = std::chrono::steady_clock::now();
-        misc::prof_main_frame_us.store((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(frame_end - frame_start).count(), std::memory_order_relaxed);
+        const auto elapsed_us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(frame_end - frame_start).count();
+        misc::prof_main_frame_us.store(elapsed_us, std::memory_order_relaxed);
         misc::prof_main_frame_count.fetch_add(1, std::memory_order_relaxed);
+        misc::record_performance_frame(elapsed_us, render_snapshot_age_us, render_snapshot_id);
     }
-    if (GUI::save_status != GUI::save_status_t::saved) GUI::save_now();
+    missile_registry_storage::flush(); // ultimo intento, no guarda preferencias
     core::Shutdown();
+    ImGui::DestroyPlatformWindows();
     ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
     CleanupDeviceD3D(); ::DestroyWindow(hwnd); ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
     return FALSE;
@@ -1548,40 +1177,77 @@ int main(int, char**)
 // ====================== D3D / monitor / WndProc ======================
 bool CreateDeviceD3D(HWND hWnd)
 {
-    DXGI_SWAP_CHAIN_DESC sd;
-    ZeroMemory(&sd, sizeof(sd));
-    sd.BufferCount = 2;
-    sd.BufferDesc.Width = 0;
-    sd.BufferDesc.Height = 0;
-    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferDesc.RefreshRate.Numerator = 0;
-    sd.BufferDesc.RefreshRate.Denominator = 0;
-    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = hWnd;
-    sd.SampleDesc.Count = 1;
-    sd.SampleDesc.Quality = 0;
-    sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-
-    UINT createDeviceFlags = 0;
     D3D_FEATURE_LEVEL featureLevel;
-    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
-    HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags,
-        featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
-    if (res == DXGI_ERROR_UNSUPPORTED)
-        res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags,
-            featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
-    if (res != S_OK)
+    const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    // An HWND swap chain discards alpha: translucent strokes darken against
+    // its black clear color. A premultiplied DirectComposition surface lets
+    // Windows blend the overlay with the actual desktop/game beneath it.
+    constexpr UINT device_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, device_flags,
+        levels, 2, D3D11_SDK_VERSION, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, device_flags,
+            levels, 2, D3D11_SDK_VERSION, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (FAILED(hr))
+    {
+        LOG("[D3D] CreateDevice failed: 0x%08X\n", static_cast<unsigned int>(hr));
+        CleanupDeviceD3D();
         return false;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
+    hr = g_pd3dDevice->QueryInterface(IID_PPV_ARGS(dxgi_device.GetAddressOf()));
+    if (SUCCEEDED(hr)) hr = dxgi_device->GetAdapter(adapter.GetAddressOf());
+    if (SUCCEEDED(hr)) hr = adapter->GetParent(IID_PPV_ARGS(factory.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        LOG("[D3D] DXGI factory failed: 0x%08X\n", static_cast<unsigned int>(hr));
+        CleanupDeviceD3D();
+        return false;
+    }
+
+    RECT client{};
+    ::GetClientRect(hWnd, &client);
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
+    desc.Height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    hr = factory->CreateSwapChainForComposition(g_pd3dDevice, &desc, nullptr, &g_pSwapChain);
+    if (SUCCEEDED(hr)) hr = DCompositionCreateDevice(dxgi_device.Get(), IID_PPV_ARGS(&g_compositionDevice));
+    if (SUCCEEDED(hr)) hr = g_compositionDevice->CreateTargetForHwnd(hWnd, TRUE, &g_compositionTarget);
+    if (SUCCEEDED(hr)) hr = g_compositionDevice->CreateVisual(&g_compositionVisual);
+    if (SUCCEEDED(hr)) hr = g_compositionVisual->SetContent(g_pSwapChain);
+    if (SUCCEEDED(hr)) hr = g_compositionTarget->SetRoot(g_compositionVisual);
+    if (SUCCEEDED(hr)) hr = g_compositionDevice->Commit();
+    if (FAILED(hr))
+    {
+        LOG("[D3D] Transparent composition failed: 0x%08X\n", static_cast<unsigned int>(hr));
+        CleanupDeviceD3D();
+        return false;
+    }
 
     CreateRenderTarget();
+    if (!g_mainRenderTargetView)
+    {
+        CleanupDeviceD3D();
+        return false;
+    }
     return true;
 }
 
 void CleanupDeviceD3D()
 {
     CleanupRenderTarget();
+    if (g_compositionTarget) { g_compositionTarget->SetRoot(nullptr); g_compositionTarget->Release(); g_compositionTarget = nullptr; }
+    if (g_compositionVisual) { g_compositionVisual->Release(); g_compositionVisual = nullptr; }
+    if (g_compositionDevice) { g_compositionDevice->Commit(); g_compositionDevice->Release(); g_compositionDevice = nullptr; }
     if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
     if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
     if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
@@ -1708,7 +1374,7 @@ void ApplyFullscreenToMonitor(HWND hWnd, int index)
 
     const RECT& rc = data.rc;
     ::SetWindowLongPtrW(hWnd, GWL_STYLE, WS_POPUP);
-    ::SetWindowLongPtrW(hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_APPWINDOW);
+    ::SetWindowLongPtrW(hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP);
     ::SetWindowPos(hWnd, HWND_TOPMOST, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
         SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 

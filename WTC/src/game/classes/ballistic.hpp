@@ -12,6 +12,9 @@ public:
 		this->base_address = TargetProcess->Read<uintptr_t>(addr);
 		return (this->base_address != 0);
 	}
+	auto init_from_validated_base(uintptr_t address) -> bool {
+		this->base_address=address;return address!=0;
+	}
 public:
 
 	auto getVelocity() -> float {

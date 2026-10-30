@@ -9,6 +9,9 @@ public:
             TargetProcess->Read<std::uintptr_t>(runtime::base_address() + offsets::localplayer_offset);
         return this->base_address != 0;
     }
+    auto init_from_validated_base(std::uintptr_t address) -> bool {
+        this->base_address=address;return address!=0;
+    }
 
     // 다른 엔티티용으로 쓸 수 있게 기본 생성자 추가
     c_entity(std::uintptr_t base = 0)
@@ -27,7 +30,10 @@ public:
             TargetProcess->Read<std::uintptr_t>(
                 this->base_address + offsets::localplayer::localunit_offset
             );
-        return c_unit(addr - 1);
+        // El bit bajo puede marcar la unidad; cero y punteros no alineados
+        // son transiciones de batalla, no una unidad legible.
+        const std::uintptr_t unit=(addr & 1) ? addr-1 : addr;
+        return c_unit(startup_pointer_probe::plausible_pointer(unit) ? unit : 0);
     }
 
     // ★ 이 엔티티에 닉네임이 있는지 여부만 확인 (봇 필터용)

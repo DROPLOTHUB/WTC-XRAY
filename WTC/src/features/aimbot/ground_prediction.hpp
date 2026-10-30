@@ -8,6 +8,13 @@ namespace ground_prediction {
 inline bool finite(const vec3_t& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
+// W2S puede aceptar un punto delante de la camara aunque quede fuera del
+// monitor. No afirmar "Dibujando" si ImGui recortara el marcador.
+inline bool screen_visible(float x,float y,float vx,float vy,float width,float height) {
+    return std::isfinite(x) && std::isfinite(y) && std::isfinite(vx) &&
+        std::isfinite(vy) && std::isfinite(width) && std::isfinite(height) &&
+        width>0 && height>0 && x>=vx && x<vx+width && y>=vy && y<vy+height;
+}
 struct Ballistics {
     float speed = 0, mass = 0, caliber = 0, length = 0, drag = 0;
 };

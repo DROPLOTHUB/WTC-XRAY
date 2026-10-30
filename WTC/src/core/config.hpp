@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include "config_validation.hpp"
+
 namespace GUI
 {
     void load_presets_from_map( const std::unordered_map<std::string, std::string>& values );
@@ -9,6 +14,7 @@ namespace GUI
 
 namespace config
 {
+    inline bool primary_invalid = false; // Do not replace the good backup with a corrupt primary.
     inline constexpr const char* default_config_content = R"(esp_enabled=1
 aimbot_enabled=1
 esp_show_boxes=1
@@ -172,45 +178,25 @@ preset2_monitor_index=0
 
     inline float parse_float( const std::string& value, float fallback )
     {
-        try
-        {
-            return std::stof( value );
-        }
-        catch ( ... )
-        {
-            return fallback;
-        }
+        return config_validation::parse_float(value,fallback);
     }
 
     inline int parse_int( const std::string& value, int fallback )
     {
-        try
-        {
-            return std::stoi( value );
-        }
-        catch ( ... )
-        {
-            return fallback;
-        }
+        return config_validation::parse_int(value,fallback);
     }
 
     inline void apply_color( ImVec4& color, const std::string& value )
     {
-        std::stringstream stream( value );
-        float x = color.x;
-        float y = color.y;
-        float z = color.z;
-        float w = color.w;
-        char separator1 = ',';
-        char separator2 = ',';
-        char separator3 = ',';
-        if ( stream >> x >> separator1 >> y >> separator2 >> z >> separator3 >> w )
-            color = ImVec4( x, y, z, w );
+        std::array<float,4> rgba{color.x,color.y,color.z,color.w};
+        if(config_validation::parse_rgba(value,rgba))
+            color=ImVec4(rgba[0],rgba[1],rgba[2],rgba[3]);
     }
 
     inline std::string color_to_string( const ImVec4& color )
     {
         std::ostringstream stream;
+        stream << std::setprecision( std::numeric_limits<float>::max_digits10 );
         stream << color.x << ',' << color.y << ',' << color.z << ',' << color.w;
         return stream.str( );
     }
@@ -276,6 +262,7 @@ preset2_monitor_index=0
 
     inline void load( )
     {
+        primary_invalid = false;
         const std::filesystem::path path = get_config_path( );
         if ( !ensure_config_directory( path ) )
         {
@@ -292,6 +279,12 @@ preset2_monitor_index=0
         std::ifstream input( path );
         if ( !input.is_open( ) )
         {
+            std::filesystem::path backup = path; backup += L".bak";
+            input.open( backup );
+            if ( input.is_open( ) ) primary_invalid = true;
+        }
+        if ( !input.is_open( ) )
+        {
             std::ofstream output( path, std::ios::trunc );
             if ( output.is_open( ) )
             {
@@ -304,20 +297,33 @@ preset2_monitor_index=0
             return;
 
         std::unordered_map<std::string, std::string> values;
-        std::string line;
-        while ( std::getline( input, line ) )
-        {
-            if ( line.empty( ) || line[ 0 ] == '#' || line[ 0 ] == ';' )
-                continue;
-
-            const auto separator_pos = line.find( '=' );
-            if ( separator_pos == std::string::npos )
-                continue;
-
-            const std::string key = trim( line.substr( 0, separator_pos ) );
-            const std::string value = trim( line.substr( separator_pos + 1 ) );
-            if ( !key.empty( ) )
-                values[ key ] = value;
+        const auto parse_stream = [&]( std::istream& source ) {
+            values.clear();
+            std::string line;
+            while ( std::getline( source, line ) ) {
+                if ( line.empty( ) || line[ 0 ] == '#' || line[ 0 ] == ';' ) continue;
+                const auto separator_pos = line.find( '=' );
+                if ( separator_pos == std::string::npos ) continue;
+                const std::string key = trim( line.substr( 0, separator_pos ) );
+                if ( !key.empty( ) ) values[ key ] = trim( line.substr( separator_pos + 1 ) );
+            }
+        };
+        const auto recognized = [&] {
+            if ( values.contains( "active_preset" ) || values.contains( "preset1_esp_enabled" ) ) return true;
+            for ( const auto& binding : bool_bindings ) if ( values.contains( binding.key ) ) return true;
+            for ( const auto& binding : float_bindings ) if ( values.contains( binding.key ) ) return true;
+            for ( const auto& binding : int_bindings ) if ( values.contains( binding.key ) ) return true;
+            return false;
+        };
+        parse_stream( input );
+        if ( !recognized() ) {
+            std::filesystem::path backup = path; backup += L".bak";
+            std::ifstream fallback( backup );
+            if ( !fallback.is_open() ) { LOG( "[CONFIG] Configuracion ilegible y sin respaldo.\n" ); return; }
+            parse_stream( fallback );
+            if ( !recognized() ) { LOG( "[CONFIG] Respaldo tambien invalido.\n" ); return; }
+            primary_invalid = true;
+            LOG( "[CONFIG] Restaurando desde copia de seguridad.\n" );
         }
 
         for ( const auto& binding : bool_bindings )
@@ -404,7 +410,8 @@ preset2_monitor_index=0
 
         output << "entity_update_interval_ms=" << std::clamp( core::entity_update_interval_ms.load( ), 1, 200 ) << '\n';
         output << "frame_update_interval_ms=" << std::clamp( core::frame_update_interval_ms.load( ), 1, 200 ) << '\n';
-        output << "monitor_index=" << sdk::monitor_index << '\n';
+        for ( const auto& binding : int_bindings )
+            output << binding.key << '=' << *binding.value << '\n';
 
         for ( const auto& binding : color_bindings )
             output << binding.key << '=' << color_to_string( *binding.value ) << '\n';
@@ -414,11 +421,25 @@ preset2_monitor_index=0
         output.flush( );
         const bool written = output.good( );
         output.close( );
-        if ( !written || !::MoveFileExW( temporary.c_str( ), path.c_str( ), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) )
+        if ( !written ) return false;
+        // Keep the last valid configuration before replacing it atomically.
+        std::error_code backup_error;
+        if ( !primary_invalid && std::filesystem::exists( path, backup_error ) && !backup_error )
+        {
+            std::filesystem::path backup = path; backup += L".bak";
+            if ( !::CopyFileW( path.c_str( ), backup.c_str( ), FALSE ) )
+            {
+                LOG( "[CONFIG] Copia de seguridad fallida: %lu\n", ::GetLastError( ) );
+                return false;
+            }
+        }
+        if ( backup_error ) return false;
+        if ( !::MoveFileExW( temporary.c_str( ), path.c_str( ), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) )
         {
             LOG( "[CONFIG] No se pudo guardar: %s (error %lu)\n", path.string( ).c_str( ), ::GetLastError( ) );
             return false;
         }
+        primary_invalid = false;
         return true;
     }
 

@@ -28,8 +28,17 @@
 
 #include "game/classes/movement.hpp"
 #include "xray_bvh.hpp"
+#include "esp_frame_policy.hpp"
+#include "../../core/render_work_policy.hpp"
+#include "../../core/adjacent_value_fields.hpp"
+#include "unit_type_filter.hpp"
+#include "reload_display_policy.hpp"
+#include "invulnerability_display_policy.hpp"
 #include "radar.hpp"
 #include "air_lead_prediction.hpp"
+#include "air_lead_tracking.hpp"
+#include "air_intercept.hpp"
+#include "coverage_opacity.hpp"
 
 struct vec4_t {
     float x, y, z, w;
@@ -74,6 +83,7 @@ namespace esp
         std::string vehicle_name;
         uint16_t raw_type = 0;
         std::chrono::steady_clock::time_point next_refresh{};
+        std::chrono::steady_clock::time_point next_name_refresh{};
         std::chrono::steady_clock::time_point last_seen{};
     };
 
@@ -100,6 +110,7 @@ namespace esp
     struct unit_reload_cache_t
     {
         uint8_t value = 0;
+        bool valid = false;
         std::chrono::steady_clock::time_point next_refresh{};
         std::chrono::steady_clock::time_point last_seen{};
     };
@@ -125,6 +136,8 @@ namespace esp
 
     inline unit_type_info_t get_unit_type_info(std::string_view unit_type, uint16_t raw_type)
     {
+        if (unit_type_filter::noncombatant(unit_type))
+            return { IM_COL32(255, 255, 255, 255), false, true, false, false, false };
         UnitClass cls = classify_unit_type(raw_type);
 
         if (cls == UnitClass::Air) {
@@ -150,19 +163,6 @@ namespace esp
             if (unit_type == "exp_cruiser")          return { ImGui::ColorConvertFloat4ToU32(sdk::color_cruiser), sdk::show_cruiser, false, false, false, false };
             if (unit_type == "exp_torpedo_gun_boat") return { ImGui::ColorConvertFloat4ToU32(sdk::color_torpedo_boat), sdk::show_torpedo_boat, false, false, false, false };
             return { IM_COL32(255, 255, 255, 255), false, false, false, false, false };
-        }
-
-        if (unit_type == "exp_fortification" ||
-            unit_type == "exp_structure" ||
-            unit_type == "exp_aaa" ||
-            unit_type == "dummy_plane" ||
-            unit_type == "exp_bridge" ||
-            unit_type == "dummy_tank" ||
-            unit_type == "dummy_immortal" ||
-            unit_type == "structures/dummy_immortal" ||
-            unit_type == "ai_bot")
-        {
-            return { IM_COL32(255, 255, 255, 255), false, true, false, false, false };
         }
 
         return { IM_COL32(255, 255, 255, 255), false, false, false, true, false };
@@ -191,14 +191,22 @@ namespace esp
         const auto now = clock::now();
         auto& entry = cache[unit_base];
 
-        if (now >= entry.next_refresh)
-        {
-            auto info = unit.getInfo();
-            entry.unit_type = info.getUnitType();
-            entry.vehicle_name = info.getVehicleName();
-            entry.raw_type = TargetProcess->Read<uint16_t>(
-                unit_base + offsets::unit_offsets::unitType_offset);
-            entry.next_refresh = now + std::chrono::milliseconds(1500);
+        const bool refresh_type=now>=entry.next_refresh;
+        bool refresh_name=sdk::esp_show_vehicle_names && now>=entry.next_name_refresh;
+        if(refresh_type || refresh_name) {
+            auto info=unit.getInfo();
+            if(refresh_type) {
+                const auto type=info.getUnitType();
+                if(type!=entry.unit_type) { entry.vehicle_name.clear(); entry.next_name_refresh={}; refresh_name=sdk::esp_show_vehicle_names; }
+                entry.unit_type=type;
+                entry.raw_type=TargetProcess->Read<uint16_t>(
+                    unit_base+offsets::unit_offsets::unitType_offset);
+                entry.next_refresh=now+std::chrono::milliseconds(1500);
+            }
+            if(refresh_name) {
+                entry.vehicle_name=info.getVehicleName();
+                entry.next_name_refresh=now+std::chrono::seconds(4);
+            }
         }
         entry.last_seen = now;
 
@@ -257,7 +265,7 @@ namespace esp
         return entry;
     }
 
-    inline unit_reload_cache_t& get_cached_reload_info(const uintptr_t unit_base, c_unit& unit)
+    inline unit_reload_cache_t& get_cached_reload_info(const uintptr_t unit_base)
     {
         using clock = std::chrono::steady_clock;
         static std::unordered_map<uintptr_t, unit_reload_cache_t> cache;
@@ -267,8 +275,11 @@ namespace esp
         auto& entry = cache[unit_base];
         if (now >= entry.next_refresh)
         {
-            entry.value = unit.getReloadTime();
-            entry.next_refresh = now + std::chrono::milliseconds(80);
+            uint8_t value=0;
+            const auto address=unit_base+offsets::unit_offsets::visualReloadProgress_offset;
+            entry.valid=TargetProcess->Read(address,&value,sizeof(value)); // misma ruta que Read<uint8_t> anterior
+            if (entry.valid) entry.value=value;
+            entry.next_refresh = now + std::chrono::milliseconds(200);
         }
         entry.last_seen = now;
 
@@ -284,6 +295,51 @@ namespace esp
             next_gc = now + std::chrono::seconds(5);
         }
 
+        return entry;
+    }
+
+    struct unit_invul_cache_t {
+        bool flag_valid=false;
+        bool invalid_flag=false;
+        bool invulnerable=false;
+        bool timer_valid=false;
+        float timer=0.f;
+        std::chrono::steady_clock::time_point next_refresh{};
+        std::chrono::steady_clock::time_point last_seen{};
+    };
+    inline unit_invul_cache_t& get_cached_invulnerability(const uintptr_t unit_base) {
+        using clock=std::chrono::steady_clock;
+        static std::unordered_map<uintptr_t,unit_invul_cache_t> cache;
+        static auto next_gc=clock::now()+std::chrono::seconds(5);
+        const auto now=clock::now();
+        auto& entry=cache[unit_base];
+        if(now>=entry.next_refresh) {
+            std::uint8_t raw=0;
+            const bool read_ok=TargetProcess->ReadOptional(unit_base+
+                offsets::unit_offsets::invulnerable_offset,&raw,sizeof(raw));
+            entry.invalid_flag=read_ok && !invulnerability_display_policy::valid_flag(raw);
+            entry.flag_valid=read_ok && !entry.invalid_flag;
+            entry.invulnerable=entry.flag_valid && invulnerability_display_policy::invulnerable(raw);
+            entry.timer_valid=false;
+            if(entry.invulnerable && offsets::invul_timer_offset_available) {
+                float timer=0.f;
+                if(TargetProcess->ReadOptional(unit_base+
+                    offsets::unit_offsets::invulTimer_offset,&timer,sizeof(timer)) &&
+                    invulnerability_display_policy::displayable_timer(timer)) {
+                    entry.timer=timer;
+                    entry.timer_valid=true;
+                }
+            }
+            entry.next_refresh=now+std::chrono::milliseconds(500);
+        }
+        entry.last_seen=now;
+        if(now>=next_gc) {
+            for(auto it=cache.begin();it!=cache.end();) {
+                if(now-it->second.last_seen>std::chrono::seconds(10))it=cache.erase(it);
+                else ++it;
+            }
+            next_gc=now+std::chrono::seconds(5);
+        }
         return entry;
     }
 
@@ -535,6 +591,26 @@ namespace esp
         bool valid = false;
     };
 
+    inline auto projected_bounds_from_screen_corners(const std::array<vec2_t,8>& corners)
+        -> projected_box_bounds_t
+    {
+        projected_box_bounds_t bounds{};
+        float min_x=corners[0].x,max_x=corners[0].x;
+        float min_y=corners[0].y,max_y=corners[0].y;
+        for (size_t i=1;i<corners.size();++i) {
+            min_x=std::min(min_x,corners[i].x);max_x=std::max(max_x,corners[i].x);
+            min_y=std::min(min_y,corners[i].y);max_y=std::max(max_y,corners[i].y);
+        }
+        if (max_x<=min_x || max_y<=min_y) return bounds;
+        if (const auto* viewport=ImGui::GetMainViewport()) {
+            min_x=std::clamp(min_x,viewport->Pos.x,viewport->Pos.x+viewport->Size.x);
+            max_x=std::clamp(max_x,viewport->Pos.x,viewport->Pos.x+viewport->Size.x);
+            min_y=std::clamp(min_y,viewport->Pos.y,viewport->Pos.y+viewport->Size.y);
+            max_y=std::clamp(max_y,viewport->Pos.y,viewport->Pos.y+viewport->Size.y);
+        }
+        return {min_x,min_y,max_x,max_y,true};
+    }
+
     inline auto get_projected_box_bounds(
         c_unit& unit,
         const vec3_t& unit_pos,
@@ -603,7 +679,8 @@ namespace esp
         uint32_t& w2s_counter,
         uint32_t& obb_counter,
         ImU32 color,
-        float* out_max_y = nullptr)
+        float* out_max_y = nullptr,
+        projected_box_bounds_t* out_bounds = nullptr)
     {
         const auto bounds = get_projected_box_bounds(unit, unit_pos, distance_f, camera_matrix, projection_ctx, w2s_counter, obb_counter);
         if (!bounds.valid)
@@ -612,6 +689,8 @@ namespace esp
         g_render->rect(bounds.min_x, bounds.min_y, bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y, color, 0.0f);
         if (out_max_y)
             *out_max_y = bounds.max_y;
+        if (out_bounds)
+            *out_bounds = bounds;
         return true;
     }
 
@@ -757,13 +836,13 @@ namespace esp
         bool      animated_ok = false;
     };
 
-    inline unit_skeleton_ctx_t read_unit_skeleton_ctx(uintptr_t unit_base)
+    inline unit_skeleton_ctx_t read_unit_skeleton_ctx(uintptr_t unit_base, uintptr_t dm_root)
     {
         unit_skeleton_ctx_t ctx{};
         if (!unit_base) return ctx;
 
-        ctx.dm = TargetProcess->Read<uintptr_t>(
-            unit_base + offsets::unit_offsets::damageModelCont_offset);
+        // get_xray_cache acaba de leer esta raíz en el mismo render.
+        ctx.dm = dm_root;
         if (!ctx.dm) return ctx;
 
         ctx.valid_flag = TargetProcess->Read<uint8_t>(
@@ -807,114 +886,57 @@ namespace esp
     using xray_part_kind_t = xray::xray_part_kind_t;
 
     // ========================================================================
-    // [SECCIÓN 8] X-RAY — BATCHING Y DIBUJO
+    // [SECCIÓN 8] X-RAY — MALLA ORIGINAL Y CAJAS EXCLUSIVAS PARA AMMO
     // ========================================================================
 
-    struct FillBatch
-    {
-        std::vector<ImDrawVert> verts;
-        std::vector<ImDrawIdx>  indices;
-    };
-    using FillBatchMap = std::unordered_map<ImU32, FillBatch>;
-
-    inline void flush_fill_batches(ImDrawList* draw_list, FillBatchMap& batches)
-    {
-        if (!draw_list) return;
-
-        for (auto& [kind, batch] : batches)
-        {
-            const int vtx_count = static_cast<int>(batch.verts.size());
-            const int idx_count = static_cast<int>(batch.indices.size());
-            if (vtx_count == 0 || idx_count == 0)
-                continue;
-
-            const ImDrawIdx base = static_cast<ImDrawIdx>(draw_list->VtxBuffer.Size);
-            draw_list->PrimReserve(idx_count, vtx_count);
-
-            std::memcpy(draw_list->_VtxWritePtr, batch.verts.data(),
-                vtx_count * sizeof(ImDrawVert));
-
-            for (int i = 0; i < idx_count; ++i)
-                draw_list->_IdxWritePtr[i] = base + batch.indices[i];
-
-            draw_list->_VtxWritePtr = draw_list->VtxBuffer.Data + draw_list->VtxBuffer.Size;
-            draw_list->_IdxWritePtr = draw_list->IdxBuffer.Data + draw_list->IdxBuffer.Size;
-        }
-    }
-
-    // ------------------------------------------------------------------------
-    // [SECCIÓN 8a] Proyección de un part a buffers reutilizables.
-    // NO proyecta para dibujar: solo llena out_projected / out_visible.
-    // ------------------------------------------------------------------------
-    inline size_t project_part_vertices_to(
-        const xray::XrayPart& part,
-        const part_xform_t* part_transform,
-        const rotation_matrix_t& unit_rot,
-        const vec3_t& unit_pos,
-        const ViewMatrix_t& camera_matrix,
-        const projection_context_t& proj_ctx,
-        uint32_t& w2s_counter,
-        std::vector<vec2_t>& out_projected,
-        std::vector<uint8_t>& out_visible)
-    {
-        const size_t n = part.vertices.size();
-        out_projected.resize(n);
-        out_visible.assign(n, 0);
-
-        size_t visible_count = 0;
-        for (size_t i = 0; i < n; ++i)
-        {
-            const vec3_t v_local = bvh_vertex_to_local_game(part.vertices[i], part_transform);
-            const vec3_t p_world = unit_rot.transform(v_local) + unit_pos;
-            if (world_to_screen_counted(p_world, out_projected[i], camera_matrix, proj_ctx, w2s_counter))
-            {
-                out_visible[i] = 1;
-                ++visible_count;
+    // Wireframe usa AddLine de ImGui: no hay lotes de malla rellena.
+    inline size_t project_part_vertices_to(const xray::XrayPart& part,
+        const part_xform_t* transform,const rotation_matrix_t& unit_rot,
+        const vec3_t& unit_pos,const ViewMatrix_t& camera_matrix,
+        const projection_context_t& proj_ctx,uint32_t& w2s_counter,
+        std::vector<vec2_t>& projected,std::vector<uint8_t>& visible) {
+        const size_t n=part.vertices.size();
+        projected.resize(n);visible.assign(n,0);
+        size_t count=0;
+        for(size_t i=0;i<n;++i) {
+            const vec3_t local=bvh_vertex_to_local_game(part.vertices[i],transform);
+            const vec3_t world=unit_rot.transform(local)+unit_pos;
+            if(world_to_screen_counted(world,projected[i],camera_matrix,proj_ctx,w2s_counter)) {
+                visible[i]=1;++count;
             }
         }
-        return visible_count;
+        return count;
     }
-
-    // ------------------------------------------------------------------------
-    // [SECCIÓN 8b] Dibujo de wireframe desde buffers ya proyectados.
-    // Reutiliza el resultado de project_part_vertices_to sin re-proyectar.
-    // ------------------------------------------------------------------------
-    inline void draw_lines_from_projected(
-        const std::vector<uint32_t>& indices,
-        const std::vector<vec2_t>& projected,
-        const std::vector<uint8_t>& visible,
-        ImDrawList* draw_list,
-        ImU32 color,
-        float thickness)
-    {
-        if (!draw_list) return;
-        const size_t n = projected.size();
-        if (n == 0) return;
-
-        const size_t tri_count = indices.size() / 3;
-        for (size_t t = 0; t < tri_count; ++t)
-        {
-            const uint32_t ia = indices[t * 3 + 0];
-            const uint32_t ib = indices[t * 3 + 1];
-            const uint32_t ic = indices[t * 3 + 2];
-            if (ia >= n || ib >= n || ic >= n) continue;
-            if (!visible[ia] || !visible[ib] || !visible[ic]) continue;
-
-            const ImVec2 a(projected[ia].x, projected[ia].y);
-            const ImVec2 b(projected[ib].x, projected[ib].y);
-            const ImVec2 c(projected[ic].x, projected[ic].y);
-
-            draw_list->AddLine(a, b, color, thickness);
-            draw_list->AddLine(b, c, color, thickness);
-            draw_list->AddLine(c, a, color, thickness);
+    inline void draw_lines_from_projected(const std::vector<uint32_t>& indices,
+        const std::vector<vec2_t>& projected,const std::vector<uint8_t>& visible,
+        ImDrawList* draw_list,ImU32 color,float thickness) {
+        if(!draw_list||projected.empty())return;
+        const size_t n=projected.size();
+        for(size_t t=0;t<indices.size()/3;++t) {
+            const uint32_t a=indices[t*3],b=indices[t*3+1],c=indices[t*3+2];
+            if(a>=n||b>=n||c>=n||!visible[a]||!visible[b]||!visible[c])continue;
+            draw_list->AddLine(ImVec2(projected[a].x,projected[a].y),ImVec2(projected[b].x,projected[b].y),color,thickness);
+            draw_list->AddLine(ImVec2(projected[b].x,projected[b].y),ImVec2(projected[c].x,projected[c].y),color,thickness);
+            draw_list->AddLine(ImVec2(projected[c].x,projected[c].y),ImVec2(projected[a].x,projected[a].y),color,thickness);
         }
     }
+    inline void draw_module_lines_world(const xray::XrayPart& part,
+        const part_xform_t* transform,const rotation_matrix_t& unit_rot,
+        const vec3_t& unit_pos,const ViewMatrix_t& camera_matrix,
+        const projection_context_t& proj_ctx,uint32_t& w2s_counter,
+        ImU32 color,float thickness) {
+        ImDrawList* list=ImGui::GetBackgroundDrawList();
+        if(!list)list=ImGui::GetForegroundDrawList();
+        if(!list)return;
+        thread_local std::vector<vec2_t> projected;
+        thread_local std::vector<uint8_t> visible;
+        project_part_vertices_to(part,transform,unit_rot,unit_pos,camera_matrix,
+            proj_ctx,w2s_counter,projected,visible);
+        draw_lines_from_projected(part.indices,projected,visible,list,color,thickness);
+    }
 
-    // ------------------------------------------------------------------------
-    // [SECCIÓN 8c] Wrapper wireframe puro (solo para xray_render_mode == 0).
-    // Usa buffers thread_local internos.
-    // ------------------------------------------------------------------------
-    inline void draw_module_lines_world(
+    // Sólo ocho esquinas por módulo Ammo, no para el resto.
+    inline bool project_xray_rect(
         const xray::XrayPart& part,
         const part_xform_t* part_transform,
         const rotation_matrix_t& unit_rot,
@@ -922,26 +944,34 @@ namespace esp
         const ViewMatrix_t& camera_matrix,
         const projection_context_t& proj_ctx,
         uint32_t& w2s_counter,
-        ImU32 color,
-        float thickness)
+        ImVec2& out_min, ImVec2& out_max)
     {
-        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
-        if (!draw_list) draw_list = ImGui::GetForegroundDrawList();
-        if (!draw_list) return;
-
-        thread_local std::vector<vec2_t>  s_wire_projected;
-        thread_local std::vector<uint8_t> s_wire_visible;
-
-        project_part_vertices_to(part, part_transform, unit_rot, unit_pos,
-            camera_matrix, proj_ctx, w2s_counter, s_wire_projected, s_wire_visible);
-
-        draw_lines_from_projected(part.indices, s_wire_projected, s_wire_visible,
-            draw_list, color, thickness);
+        if(!part.local_bounds.valid)return false;
+        float min_x=std::numeric_limits<float>::max(),min_y=min_x;
+        float max_x=std::numeric_limits<float>::lowest(),max_y=max_x;
+        int count=0;
+        xray::boxes::each_corner(part.local_bounds,[&](float x,float y,float z){
+            vec3_t vertex{};vertex.x=x;vertex.y=y;vertex.z=z;
+            const vec3_t local=bvh_vertex_to_local_game(vertex,part_transform);
+            const vec3_t world=unit_rot.transform(local)+unit_pos;
+            vec2_t screen{};
+            if(world_to_screen_counted(world,screen,camera_matrix,proj_ctx,w2s_counter) &&
+               std::isfinite(screen.x) && std::isfinite(screen.y)) {
+                min_x=std::min(min_x,screen.x);min_y=std::min(min_y,screen.y);
+                max_x=std::max(max_x,screen.x);max_y=std::max(max_y,screen.y);
+                ++count;
+            }
+        });
+        if(count<2)return false;
+        // Los elementos diminutos conservan un contorno visible sin reproyectar.
+        const float pad_x=std::max(0.f,(3.f-(max_x-min_x))*0.5f);
+        const float pad_y=std::max(0.f,(3.f-(max_y-min_y))*0.5f);
+        out_min=ImVec2(min_x-pad_x,min_y-pad_y);
+        out_max=ImVec2(max_x+pad_x,max_y+pad_y);
+        return true;
     }
 
-    // ------------------------------------------------------------------------
-    // [SECCIÓN 8d] Draw X-Ray modules (con todas las optimizaciones).
-    // ------------------------------------------------------------------------
+    // [SECCIÓN 8b] X-Ray por cajas: ningún triángulo de la malla se dibuja.
     inline void draw_xray_modules(
         c_unit& unit,
         const vec3_t& unit_pos,
@@ -951,12 +981,10 @@ namespace esp
         float distance_f)
     {
         const uintptr_t unit_base = unit.get_base();
-        rotation_matrix_t unit_rot = unit.getRotationMatrix();
-
         auto& cache = xray::get_xray_cache(unit_base);
-
         if (cache.parts.empty())
             return;
+        rotation_matrix_t unit_rot = unit.getRotationMatrix();
 
         ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
         if (!draw_list) draw_list = ImGui::GetForegroundDrawList();
@@ -965,7 +993,7 @@ namespace esp
         // ====================================================================
         // CONTEXTO LEÍDO UNA SOLA VEZ POR UNIT/FRAME
         // ====================================================================
-        const unit_skeleton_ctx_t skel = read_unit_skeleton_ctx(unit_base);
+        const unit_skeleton_ctx_t skel = read_unit_skeleton_ctx(unit_base,cache.dm_root);
 
         // ====================================================================
         // VIEWPORT + MARGEN PARA CULLING 2D
@@ -975,18 +1003,6 @@ namespace esp
         const float vp_h = vp ? vp->Size.y : 1080.0f;
         const float vp_margin = 200.0f;
 
-        // Key by module kind (at most seven), NOT animated color/alpha.
-        // unordered_map::clear destroys nested vectors; clear their sizes instead.
-        // Retain geometry capacity without accumulating keys as distance/colors change.
-        thread_local FillBatchMap fill_batches;
-        for (auto& entry : fill_batches) {
-            entry.second.verts.clear();
-            entry.second.indices.clear();
-        }
-
-        // Buffers reusables por thread para el pase de proyección.
-        thread_local std::vector<vec2_t>  s_projected;
-        thread_local std::vector<uint8_t> s_visible;
 
         // Cache de transforms por índice dentro de la unit/frame.
         // - animated_cache por tree_index (skeleton tree)
@@ -1046,7 +1062,8 @@ namespace esp
             if (is_small && distance_f > sdk::xray_small_module_distance)
                 continue;
 
-            if (part.vertices.empty() || part.indices.size() < 3)
+            if (xray::boxes::compact(kind) ? !part.local_bounds.valid :
+                (part.vertices.empty() || part.indices.size() < 3))
                 continue;
 
             // ---- Transform: skeleton tree primero, bind pose de fallback ----
@@ -1100,128 +1117,81 @@ namespace esp
                 color = (color & 0x00FFFFFF) | (alpha << 24);
             }
 
-            // ================================================================
-            // MODO WIREFRAME PURO (0)
-            //   Proyecta una sola vez con buffers thread_local y dibuja líneas.
-            //   No pasa por fill batching.
-            // ================================================================
-            if (sdk::xray_render_mode == 0)
-            {
-                draw_module_lines_world(part, p_transform, unit_rot, unit_pos,
-                    camera_matrix, proj_ctx, w2s_counter, color, sdk::xray_line_thickness);
-                continue;
-            }
-
-            // ================================================================
-            // MODO FILL (1/2) — un único pase de proyección
-            // ================================================================
-            const size_t n = part.vertices.size();
-            const size_t visible_count = project_part_vertices_to(
-                part, p_transform, unit_rot, unit_pos,
-                camera_matrix, proj_ctx, w2s_counter,
-                s_projected, s_visible);
-
-            if (visible_count == 0)
-                continue;
-
-            // ---- Bounding 2D para cull rápido ----
-            float bmin_x = std::numeric_limits<float>::max();
-            float bmin_y = std::numeric_limits<float>::max();
-            float bmax_x = std::numeric_limits<float>::lowest();
-            float bmax_y = std::numeric_limits<float>::lowest();
-
-            for (size_t i = 0; i < n; ++i)
-            {
-                if (!s_visible[i]) continue;
-                if (s_projected[i].x < bmin_x) bmin_x = s_projected[i].x;
-                if (s_projected[i].y < bmin_y) bmin_y = s_projected[i].y;
-                if (s_projected[i].x > bmax_x) bmax_x = s_projected[i].x;
-                if (s_projected[i].y > bmax_y) bmax_y = s_projected[i].y;
-            }
-
-            if (bmax_x < -vp_margin || bmax_y < -vp_margin ||
-                bmin_x > vp_w + vp_margin || bmin_y > vp_h + vp_margin)
-            {
-                continue;
-            }
-
-            // ---- Fill batch ----
-            auto& batch = fill_batches[static_cast<ImU32>(kind)];
-            batch.verts.reserve(batch.verts.size() + n);
-            batch.indices.reserve(batch.indices.size() + part.indices.size());
-
-            const size_t tri_count = part.indices.size() / 3;
-            for (size_t t = 0; t < tri_count; ++t)
-            {
-                const uint32_t ia = part.indices[t * 3 + 0];
-                const uint32_t ib = part.indices[t * 3 + 1];
-                const uint32_t ic = part.indices[t * 3 + 2];
-                if (ia >= n || ib >= n || ic >= n) continue;
-                if (!s_visible[ia] || !s_visible[ib] || !s_visible[ic]) continue;
-
-                const ImDrawIdx base = static_cast<ImDrawIdx>(batch.verts.size());
-
-                ImDrawVert v{};
-                v.uv = ImVec2(0.0f, 0.0f);
-                v.col = color;
-
-                v.pos = ImVec2(s_projected[ia].x, s_projected[ia].y); batch.verts.push_back(v);
-                v.pos = ImVec2(s_projected[ib].x, s_projected[ib].y); batch.verts.push_back(v);
-                v.pos = ImVec2(s_projected[ic].x, s_projected[ic].y); batch.verts.push_back(v);
-
-                batch.indices.push_back(base);
-                batch.indices.push_back(base + 1);
-                batch.indices.push_back(base + 2);
-            }
-
-            // ================================================================
-            // WIREFRAME OVERLAY — reusa s_projected / s_visible del pase fill.
-            // Antes se volvía a proyectar el part entero; ahora solo se
-            // dibujan las líneas con datos ya calculados.
-            // ================================================================
-            if (sdk::xray_wireframe_overlay)
-            {
-                const float overlay_thickness = std::max(0.5f, sdk::xray_line_thickness * 0.7f);
-                draw_lines_from_projected(part.indices, s_projected, s_visible,
-                    draw_list, color, overlay_thickness);
-            }
-
-            if (sdk::bShowModuleNames && distance_f <= sdk::xray_names_distance && !part.vertices.empty())
-            {
-                const vec3_t v_local = bvh_vertex_to_local_game(part.vertices[0], p_transform);
-                const vec3_t center_world = unit_rot.transform(v_local) + unit_pos;
-                vec2_t sp;
-                if (world_to_screen_counted(center_world, sp, camera_matrix, proj_ctx, w2s_counter))
-                {
-                    g_render->text(
-                        { sp.x, sp.y },
-                        IM_COL32(255, 255, 255, 255),
-                        0,
-                        part.name,
-                        g_render->fonts().m_esp,
-                        sdk::esp_font_size_module);
+            if (xray::boxes::compact(kind)) {
+                // Ammo únicamente: caja en pantalla desde ocho esquinas cacheadas.
+                ImVec2 rect_min{},rect_max{};
+                if(!project_xray_rect(part,p_transform,unit_rot,unit_pos,camera_matrix,
+                                      proj_ctx,w2s_counter,rect_min,rect_max))
+                    continue;
+                const float vp_x=vp?vp->Pos.x:0.f, vp_y=vp?vp->Pos.y:0.f;
+                if(rect_max.x<vp_x-vp_margin || rect_max.y<vp_y-vp_margin ||
+                   rect_min.x>vp_x+vp_w+vp_margin || rect_min.y>vp_y+vp_h+vp_margin)
+                    continue;
+                // Recortar cajas parcialmente fuera de pantalla previene vértices
+                // enormes cuando el módulo cruza el plano cercano de la cámara.
+                const ImVec2 clipped_min(std::max(rect_min.x,vp_x-vp_margin),
+                                         std::max(rect_min.y,vp_y-vp_margin));
+                const ImVec2 clipped_max(std::min(rect_max.x,vp_x+vp_w+vp_margin),
+                                         std::min(rect_max.y,vp_y+vp_h+vp_margin));
+                draw_list->AddRect(clipped_min,clipped_max,color,0.f,0,
+                                   std::max(.5f,sdk::xray_line_thickness));
+    
+                if(sdk::bShowModuleNames && distance_f<=sdk::xray_names_distance) {
+                    g_render->text({(clipped_min.x+clipped_max.x)*.5f,
+                                    (clipped_min.y+clipped_max.y)*.5f},
+                        IM_COL32(255,255,255,255),0,part.name,
+                        g_render->fonts().m_esp,sdk::esp_font_size_module);
                 }
+                continue; // ninguna triangulación para Ammo
             }
-        }
 
-        flush_fill_batches(draw_list, fill_batches);
+            // Todos los demás módulos conservan las líneas originales de malla.
+            draw_module_lines_world(part,p_transform,unit_rot,unit_pos,
+                camera_matrix,proj_ctx,w2s_counter,color,sdk::xray_line_thickness);
+        }
     }
 
     // ========================================================================
     // [SECCIÓN 9] RUN PRINCIPAL
     // ========================================================================
-    inline void run()
+    inline void run(const std::shared_ptr<const misc::frame_snapshot_t>& snapshot)
     {
         const auto esp_start = std::chrono::steady_clock::now();
+        misc::prof_esp_radar_us.store(0,std::memory_order_relaxed);
+        misc::prof_esp_units_us.store(0,std::memory_order_relaxed);
+        misc::prof_esp_xray_us.store(0,std::memory_order_relaxed);
+        misc::prof_esp_reload_us.store(0,std::memory_order_relaxed);
+        misc::prof_esp_invul_us.store(0,std::memory_order_relaxed);
         uint64_t aimbot_us_total = 0;
         uint64_t aimbot_calls = 0;
         uint32_t w2s_calls = 0;
         uint32_t obb_calls = 0;
+        uint64_t cull_distance=0, cull_type=0, cull_frustum=0, cull_projection=0, partial_boxes=0;
+        misc::prof_esp_cull_distance.store(0,std::memory_order_relaxed);
+        misc::prof_esp_cull_type.store(0,std::memory_order_relaxed);
+        misc::prof_esp_cull_frustum.store(0,std::memory_order_relaxed);
+        misc::prof_esp_cull_projection.store(0,std::memory_order_relaxed);
+        misc::prof_esp_partial_boxes.store(0,std::memory_order_relaxed);
+        misc::prof_reload_candidates.store(0,std::memory_order_relaxed);
+        misc::prof_reload_drawn.store(0,std::memory_order_relaxed);
+        misc::prof_reload_failed.store(0,std::memory_order_relaxed);
+        misc::prof_reload_unexpected.store(0,std::memory_order_relaxed);
+        misc::prof_reload_sample.store(-1,std::memory_order_relaxed);
+        misc::prof_invul_candidates.store(0,std::memory_order_relaxed);
+        misc::prof_invul_shown.store(0,std::memory_order_relaxed);
+        misc::prof_invul_failed.store(0,std::memory_order_relaxed);
+        misc::prof_invul_invalid.store(0,std::memory_order_relaxed);
+        misc::prof_invul_timer_shown.store(0,std::memory_order_relaxed);
 
-        if (!sdk::esp_enabled)
+        sdk::ground_prediction_status = sdk::aimbot_enabled ? "Esperando snapshot valido" : "Desactivado";
+        sdk::air_lead_status=sdk::air_lead_enabled ? "Esperando objetivo A2A" : "A2A desactivado";
+        sdk::ground_prediction_screen_known = false;
+        if (!sdk::esp_enabled) {
+            sdk::ground_prediction_status = "ESP desactivado: G2G depende del render ESP";
+            sdk::air_lead_status="ESP desactivado: A2A depende del render ESP";
             return;
+        }
 
-        const auto snapshot = misc::snapshot_frame();
         if (!snapshot)
             return;
 
@@ -1229,12 +1199,6 @@ namespace esp
         const auto& frame = curr_snapshot.frame;
         if (!frame.valid)
             return;
-
-        const auto snapshot_age_us = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - curr_snapshot.captured_at
-        ).count();
-        if (snapshot_age_us >= 0)
-            misc::prof_snapshot_age_us.store(static_cast<uint64_t>(snapshot_age_us), std::memory_order_relaxed);
 
         const ViewMatrix_t camera_matrix = frame.camera_matrix;
         const vec3_t camera_pos = frame.camera_pos;
@@ -1279,53 +1243,63 @@ namespace esp
             }
         }
 
+        const auto radar_start=std::chrono::steady_clock::now();
         radar::draw(curr_snapshot.positions);
+        misc::prof_esp_radar_us.store(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-radar_start).count()),std::memory_order_relaxed);
 
         thread_local std::vector<c_unit> units;
-        misc::snapshot_units_into(units);
+        thread_local uint64_t seen_units_revision=UINT64_MAX;
+        misc::snapshot_units_into(units,seen_units_revision);
         const vec3_t& local_pos = frame.local_pos;
 
         int32_t local_team = -1;
-        uintptr_t local_unit_base = 0;
-        rotation_matrix_t local_rot{};
-        bool has_local_rot = false;
-        {
-            uintptr_t local_player = sdk::cLocalPlayer ? sdk::cLocalPlayer->get_base() : 0;
-            uintptr_t local_unit_ptr = 0;
+        uintptr_t local_unit_base = frame.local_unit_base;
+        render_work_policy::frame_sample<rotation_matrix_t> local_rotation;
+        if (!local_unit_base) {
+            // Spectate/fallback: el snapshot no siempre contiene la unidad controlada.
+            const uintptr_t local_player = sdk::cLocalPlayer ? sdk::cLocalPlayer->get_base() : 0;
             if (local_player) {
-                local_unit_ptr = TargetProcess->Read<uintptr_t>(local_player + offsets::localplayer::localunit_offset);
-                if (!local_unit_ptr)
-                    local_unit_ptr = TargetProcess->Read<uintptr_t>(local_player + offsets::localplayer::ownedUnitRef_offset);
-                if (!local_unit_ptr)
-                    local_unit_ptr = TargetProcess->Read<uintptr_t>(local_player + offsets::localplayer::controlledUnitRef_offset);
-
-                if (local_unit_ptr) {
-                    local_unit_base = local_unit_ptr;
-                    local_rot = TargetProcess->Read<rotation_matrix_t>(local_unit_ptr + offsets::unit_offsets::rotation_matrix_offset);
-                    has_local_rot = true;
-
-                    uint8_t team_byte = TargetProcess->Read<uint8_t>(local_unit_ptr + offsets::unit_offsets::unitArmyNo_offset);
-                    local_team = static_cast<int32_t>(team_byte);
-                }
+                uintptr_t candidate = TargetProcess->Read<uintptr_t>(
+                    local_player + offsets::localplayer::localunit_offset);
+                if (!candidate) candidate = TargetProcess->Read<uintptr_t>(
+                    local_player + offsets::localplayer::ownedUnitRef_offset);
+                if (!candidate) candidate = TargetProcess->Read<uintptr_t>(
+                    local_player + offsets::localplayer::controlledUnitRef_offset);
+                candidate &= ~uintptr_t{1};
+                if (startup_pointer_probe::plausible_pointer(candidate))
+                    local_unit_base = candidate;
             }
         }
-
-        bool is_scoping = false;
-        {
-            const uintptr_t module_base = runtime::base_address();
-            uint8_t scoping_byte = 0;
-            if (module_base >= 0x10000 && module_base < 0x7FFFFFFFFFFF &&
-                offsets::is_scoping_offset < 0x7FFFFFFFFFFF - module_base)
-            {
-                TargetProcess->Read(module_base + offsets::is_scoping_offset, &scoping_byte, sizeof(scoping_byte));
+        if (local_unit_base) {
+            using clock=std::chrono::steady_clock;
+            static uintptr_t team_owner=0;
+            static int32_t cached_team=-1;
+            static uint64_t team_epoch=0;
+            static clock::time_point next_team_read{};
+            const auto now=clock::now();
+            const auto epoch=misc::unit_identity_epoch.load(std::memory_order_acquire);
+            if (frame_policy::refresh_local_team(local_unit_base,team_owner,epoch,
+                team_epoch,now,next_team_read)) {
+                uint8_t team_byte=0;
+                cached_team=TargetProcess->Read(local_unit_base+
+                    offsets::unit_offsets::unitArmyNo_offset,&team_byte,sizeof(team_byte))
+                    ? static_cast<int32_t>(team_byte) : -1;
+                team_owner=local_unit_base;
+                team_epoch=epoch;
+                next_team_read=now+std::chrono::milliseconds(250);
             }
-            is_scoping = (scoping_byte != 0);
+            local_team=cached_team;
+            // Rotation is sampled lazily below only for an actual A2A solve.
         }
 
         constexpr float ballistic_render_distance = 3500.0f;
         constexpr float ballistic_render_distance_sq = ballistic_render_distance * ballistic_render_distance;
-        if (sdk::aimbot_enabled || sdk::air_lead_enabled)
-            aimbot::BeginFrame();
+        if (frame_policy::needs_global_ballistics(frame.local_is_plane,
+            sdk::aimbot_enabled,sdk::air_lead_enabled,sdk::air_lead_use_simulation))
+            aimbot::BeginFrame(frame.local_is_plane,local_unit_base,
+                misc::unit_identity_epoch.load(std::memory_order_acquire));
 
         const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
         const ImVec2 viewport_center = main_viewport
@@ -1336,13 +1310,21 @@ namespace esp
             : 0.0f;
         const float aim_fov_radius_sq = aim_fov_radius * aim_fov_radius;
 
+
         c_unit best_aimbot_unit{};
         vec3_t best_aimbot_pos{};
-        vec2_t best_aimbot_screen_pos{};
-        float best_aimbot_distance_f = 0.0f;
-        ImU32 best_aimbot_color = IM_COL32(255, 255, 255, 255);
         float best_aimbot_score = std::numeric_limits<float>::max();
         bool has_best_aimbot_target = false;
+        struct reload_candidate_t {uintptr_t base;vec2_t screen;float distance_sq;c_unit unit;vec3_t position;float distance_m;projected_box_bounds_t cached_box;};
+        static thread_local std::vector<reload_candidate_t> reload_candidates;
+        reload_candidates.clear();
+        if (sdk::esp_show_reload && reload_candidates.capacity()<32) reload_candidates.reserve(32);
+        struct invul_candidate_t {uintptr_t base;vec2_t screen;float distance_sq;};
+        static thread_local std::vector<invul_candidate_t> invul_candidates;
+        invul_candidates.clear();
+        if (sdk::esp_show_invulnerable && offsets::invulnerable_offset_available &&
+            invul_candidates.capacity()<invulnerability_display_policy::max_indicators)
+            invul_candidates.reserve(invulnerability_display_policy::max_indicators);
 
         c_unit best_xray_unit{};
         vec3_t best_xray_pos{};
@@ -1359,19 +1341,29 @@ namespace esp
             std::chrono::steady_clock::time_point next_update{};
         };
         static std::unordered_map<uintptr_t, TeamCacheEntry> team_cache;
+        static uint64_t team_cache_epoch=0;
+        const auto current_epoch=misc::unit_identity_epoch.load(std::memory_order_acquire);
+        if(team_cache_epoch!=current_epoch) {team_cache.clear();team_cache_epoch=current_epoch;}
         static std::unordered_map<uintptr_t, AirContainerCacheEntry> air_container_cache;
+        static uint64_t air_container_epoch=0;
+        if (air_container_epoch!=current_epoch) {
+            air_container_cache.clear();air_container_epoch=current_epoch;
+        }
 
         auto get_unit_team = [&](uintptr_t unit_base) -> uint8_t {
             const auto now = std::chrono::steady_clock::now();
             auto& entry = team_cache[unit_base];
             if (now >= entry.next_update) {
-                entry.team = TargetProcess->Read<uint8_t>(unit_base + offsets::unit_offsets::unitArmyNo_offset);
+                uint8_t team=0xFF;
+                entry.team=TargetProcess->Read(unit_base+offsets::unit_offsets::unitArmyNo_offset,
+                    &team,sizeof(team)) ? team : 0xFF;
                 entry.next_update = now + std::chrono::milliseconds(500);
             }
             return entry.team;
             };
 
         auto get_air_container = [&](uintptr_t unit_base, const std::chrono::steady_clock::time_point& now) -> uintptr_t {
+            if(!offsets::air_velocity_offsets_available)return 0;
             auto& entry = air_container_cache[unit_base];
             if (now >= entry.next_update) {
                 entry.container = TargetProcess->Read<uintptr_t>(unit_base + offsets::unit_offsets::airmovement_offset);
@@ -1388,164 +1380,186 @@ namespace esp
         struct AirLeadCacheEntry {
             vec3_t raw_lead_point{};
             vec3_t smoothed_lead_point{};
-            vec3_t last_position{};
-            vec3_t measured_velocity{};
-            vec3_t filtered_velocity{};
-            vec3_t filtered_acceleration{};
+            air_lead_tracking::motion_state motion{};
             vec3_t prediction_velocity{};
             vec3_t prediction_acceleration{};
             uintptr_t last_container = 0;
             bool initialized = false;
-            bool have_position = false;
-            bool have_motion = false;
             std::chrono::steady_clock::time_point last_sample{};
             std::chrono::steady_clock::time_point last_update{};
             std::chrono::steady_clock::time_point next_sample{};
             std::chrono::steady_clock::time_point last_smooth{};
             vec3_t solve_origin{};
+            uintptr_t shooter_base=0;uint64_t shooter_generation=0;
             air_lead_model::TurnState turn_state{};
             float turn_omega = 0.0f;
+            float flight_time=0.f,model_error=0.f;
+            air_lead_tracking::source own_source=air_lead_tracking::source::none,target_source=air_lead_tracking::source::none;
         };
         static std::unordered_map<uintptr_t, AirLeadCacheEntry> air_lead_cache;
+        static uint64_t air_lead_epoch=0;
+        if (air_lead_epoch!=current_epoch) {air_lead_cache.clear();air_lead_epoch=current_epoch;}
+        const auto& ammo=aimbot::ballisticsData;
+        const air_lead_tracking::solve_context context{ammo.velocity,ammo.mass,ammo.caliber,ammo.drag,sdk::air_lead_extra_time,
+            sdk::air_lead_weapon_selection,aimbot::aircraft_weapon_trace.selected,ammo.caliber_in_mm,sdk::air_lead_use_heaviest_weapon,
+            sdk::air_lead_use_weapon_position,sdk::air_lead_use_turn_prediction,aimbot::aircraft_global_fallback,
+            offsets::air_velocity_offsets_available,offsets::air_acceleration_offset_available};
+        static air_lead_tracking::solve_context previous_context{};
+        if(!(previous_context==context)){air_lead_cache.clear();previous_context=context;}
+        struct native_motion_t {vec3_t velocity{},acceleration{};bool have_velocity=false,have_acceleration=false;};
+        const auto read_native_motion=[&](uintptr_t container) {
+            native_motion_t sample;
+            if(!container || !offsets::air_velocity_offsets_available)return sample;
+            vec3d_t v{},a{};bool velocity_ok=false,acceleration_ok=false;
+            if(offsets::air_acceleration_offset_available) {
+                const auto pair=adjacent_value_fields::read_pair<vec3d_t>(container,
+                    offsets::unit_offsets::airmovement_offsets::velocity_offset,
+                    offsets::unit_offsets::airmovement_offsets::acceleration_offset,
+                    [](uintptr_t address,void* data,size_t size){return TargetProcess->ReadOptional(address,data,size);});
+                v=pair.first;a=pair.second;velocity_ok=pair.first_valid;acceleration_ok=pair.second_valid;
+            } else velocity_ok=TargetProcess->ReadOptional(container+
+                offsets::unit_offsets::airmovement_offsets::velocity_offset,&v,sizeof(v));
+            sample.velocity={float(v.x),float(v.y),float(v.z)};
+            sample.acceleration={float(a.x),float(a.y),float(a.z)};
+            sample.have_velocity=velocity_ok && air_lead_tracking::bounded(sample.velocity,950.f);
+            sample.have_acceleration=acceleration_ok && air_lead_tracking::bounded(sample.acceleration,160.f);
+            return sample;
+        };
+        struct shooter_motion_t {
+            uintptr_t owner=0,container=0;uint64_t epoch=0,generation=0;
+            air_lead_tracking::motion_state history{};air_lead_tracking::estimate sample{};
+            air_lead_model::TurnState turn{};float omega=0;
+            std::chrono::steady_clock::time_point next{};
+        };
+        static shooter_motion_t shooter;
+        const auto sample_shooter=[&](const std::chrono::steady_clock::time_point now) {
+            if(shooter.owner!=local_unit_base || shooter.epoch!=current_epoch){shooter={};shooter.owner=local_unit_base;shooter.epoch=current_epoch;}
+            if(now>=shooter.next) {
+                shooter.next=now+std::chrono::milliseconds(30);
+                const auto container=get_air_container(local_unit_base,now);
+                if(shooter.container && container && shooter.container!=container){shooter.history={};shooter.turn={};}
+                shooter.container=container;
+                const auto native=read_native_motion(container);
+                const double timestamp=std::chrono::duration<double>(curr_snapshot.captured_at.time_since_epoch()).count();
+                shooter.sample=air_lead_tracking::observe(shooter.history,frame.local_pos,timestamp,
+                    native.have_velocity?&native.velocity:nullptr,native.have_acceleration?&native.acceleration:nullptr);
+                if(shooter.sample.reset){shooter.turn={};++shooter.generation;}
+                shooter.omega=shooter.sample.valid ? air_lead_model::update_turn_state(shooter.sample.velocity,
+                    shooter.sample.acceleration,shooter.sample.dt,local_unit_base,&shooter.turn) : 0.f;
+            }
+        };
+        bool drew_air_lead=false;
+        sdk::air_lead_own_motion_status="Sin muestra dibujada";sdk::air_lead_target_motion_status="Sin muestra dibujada";
+        sdk::air_lead_flight_time=0.f;sdk::air_lead_model_error=0.f;
+        if(sdk::air_lead_enabled && !sdk::air_lead_use_simulation)
+            sdk::air_lead_status="Use Simulation desactivado";
+        else if(sdk::air_lead_enabled && !frame.local_is_plane)
+            sdk::air_lead_status="A2A requiere avion local";
+        else if(sdk::air_lead_enabled)
+            sdk::air_lead_status="Sin objetivo aereo enemigo visible";
 
         auto run_air_lead = [&](c_unit& unit, const vec3_t& unit_pos) {
             const uintptr_t unit_base = unit.get_base();
             const auto now = std::chrono::steady_clock::now();
             auto& cache = air_lead_cache[unit_base];
+            if(cache.shooter_base!=local_unit_base) {
+                cache=AirLeadCacheEntry{};cache.shooter_base=local_unit_base;
+            }
             // DMA + filtering + solve share a cadence; rendering stays per-frame.
             // Failed solutions are throttled too, rather than retried at render FPS.
             if (now >= cache.next_sample) {
                 cache.next_sample = now + std::chrono::milliseconds(30);
                 vec3_t air_velocity{ 0.0f, 0.0f, 0.0f };
                 vec3_t air_acceleration{ 0.0f, 0.0f, 0.0f };
-                bool velocity_from_native = false;
-                bool acceleration_from_native = false;
 
-                vec3_t origin = camera_pos;
+                // Launch from the aircraft, not a third-person camera behind it.
+                vec3_t origin = frame.local_pos;
+                sample_shooter(now);
+                if(cache.shooter_generation!=shooter.generation){cache.initialized=false;cache.shooter_generation=shooter.generation;}
                 if (sdk::air_lead_use_weapon_position && local_unit_base) {
                     // Weapon-local geometry is shared across all air targets.
                     static uintptr_t weapon_owner = 0;
+                    static uint64_t weapon_epoch=0;
+                    static int weapon_selection=-2;
                     static vec3_t weapon_local{};
                     static bool weapon_valid = false;
                     static std::chrono::steady_clock::time_point weapon_next{};
-                    if (weapon_owner != local_unit_base || now >= weapon_next) {
-                        weapon_owner = local_unit_base;
-                        weapon_valid = aimbot::GetLocalWeaponLocalPosition(weapon_local);
+                    if (weapon_owner != local_unit_base || weapon_epoch!=current_epoch ||
+                        weapon_selection!=aimbot::aircraft_weapon_trace.selected || now >= weapon_next) {
+                        weapon_owner = local_unit_base;weapon_epoch=current_epoch;
+                        weapon_selection=aimbot::aircraft_weapon_trace.selected;
+                        // The position array is only known for the first gun: no invented index mapping.
+                        weapon_valid = !aimbot::aircraft_global_fallback && weapon_selection==0 &&
+                            aimbot::GetLocalWeaponLocalPosition(weapon_local,local_unit_base);
                         weapon_next = now + std::chrono::milliseconds(100);
                     }
                     if (weapon_valid) {
+                        const bool has_local_rot=frame_policy::needs_local_rotation(sdk::air_lead_enabled,
+                            sdk::air_lead_use_simulation,sdk::air_lead_use_weapon_position) &&
+                            local_rotation.get([&](rotation_matrix_t& value) {
+                                return TargetProcess->Read(local_unit_base+
+                                    offsets::unit_offsets::rotation_matrix_offset,&value,sizeof(value));
+                            });
                         if (has_local_rot) {
-                            origin = frame.local_pos + local_rot.transform(weapon_local);
+                            origin = frame.local_pos + local_rotation.value.transform(weapon_local);
                         }
-                        else {
-                            origin = frame.local_pos + weapon_local;
-                        }
+                        // Failed rotation: retain aircraft origin, never treat local offsets as world coordinates.
                     }
                 }
 
-                uintptr_t air_container = get_air_container(unit_base, now);
-                if (air_container) {
-                    vec3d_t vel_d{};
-                    const bool velocity_read = TargetProcess->Read(
-                        air_container + offsets::unit_offsets::airmovement_offsets::velocity_offset,
-                        &vel_d, sizeof(vel_d));
-                    vec3_t raw_vel = { static_cast<float>(vel_d.x), static_cast<float>(vel_d.y), static_cast<float>(vel_d.z) };
-                    if (velocity_read && std::isfinite(raw_vel.x) && std::isfinite(raw_vel.y) && std::isfinite(raw_vel.z) &&
-                        raw_vel.length() < 950.0f) {
-                        air_velocity = raw_vel;
-                        velocity_from_native = true;
-                    }
-
-                    vec3d_t acc_d{};
-                    const bool acceleration_read = TargetProcess->Read(
-                        air_container + offsets::unit_offsets::airmovement_offsets::acceleration_offset,
-                        &acc_d, sizeof(acc_d));
-                    vec3_t raw_acc = { static_cast<float>(acc_d.x), static_cast<float>(acc_d.y), static_cast<float>(acc_d.z) };
-                    if (acceleration_read && std::isfinite(raw_acc.x) && std::isfinite(raw_acc.y) && std::isfinite(raw_acc.z) &&
-                        raw_acc.length() < 160.0f) {
-                        air_acceleration = raw_acc;
-                        acceleration_from_native = true;
-                    }
+                const uintptr_t air_container=get_air_container(unit_base,now);
+                if(cache.last_container && air_container && cache.last_container!=air_container) {
+                    cache.motion={};cache.turn_state={};cache.initialized=false;
                 }
-
-                if ((cache.have_position && now - cache.last_sample > std::chrono::milliseconds(700)) ||
-                    (cache.last_container && air_container && cache.last_container != air_container)) {
-                    cache = AirLeadCacheEntry{};
-                    cache.next_sample = now + std::chrono::milliseconds(30);
+                cache.last_container=air_container;
+                const auto native=read_native_motion(air_container);
+                const auto motion=air_lead_tracking::observe(cache.motion,unit_pos,
+                    std::chrono::duration<double>(curr_snapshot.captured_at.time_since_epoch()).count(),
+                    native.have_velocity?&native.velocity:nullptr,native.have_acceleration?&native.acceleration:nullptr);
+                if(motion.reset){cache.turn_state={};cache.initialized=false;}
+                cache.last_sample=now;cache.solve_origin=origin;
+                if(!motion.valid) {
+                    cache.initialized=false;
+                    if(!drew_air_lead)sdk::air_lead_status="Esperando movimiento fiable del objetivo";
+                    return;
                 }
-                cache.last_container = air_container;
-                cache.solve_origin = origin;
-
-                const auto sample_time = curr_snapshot.captured_at;
-                if (air_lead_model::finite(unit_pos) &&
-                    (!cache.have_position || (unit_pos - cache.last_position).length() > 0.04f))
-                {
-                    if (cache.have_position)
-                    {
-                        const float dt = std::chrono::duration<float>(sample_time - cache.last_sample).count();
-                        if (dt >= 0.025f && dt <= 0.55f)
-                        {
-                            const vec3_t measured = (unit_pos - cache.last_position) / dt;
-                            if (air_lead_model::finite(measured) && measured.length() < 950.0f)
-                            {
-                                const vec3_t previous = cache.measured_velocity;
-                                const bool had_motion = cache.have_motion;
-                                const float alpha_v = 1.0f - std::exp(-dt / 0.18f);
-                                cache.filtered_velocity = had_motion
-                                    ? cache.filtered_velocity + (measured - cache.filtered_velocity) * alpha_v : measured;
-                                if (had_motion)
-                                {
-                                    const vec3_t derived = (measured - previous) / dt;
-                                    if (air_lead_model::finite(derived) && derived.length() < 160.0f)
-                                    {
-                                        const float alpha_a = 1.0f - std::exp(-dt / 0.32f);
-                                        cache.filtered_acceleration += (derived - cache.filtered_acceleration) * alpha_a;
-                                    }
-                                }
-                                cache.measured_velocity = measured;
-                                cache.have_motion = true;
-                                cache.turn_omega = air_lead_model::update_turn_state(
-                                    cache.filtered_velocity, cache.filtered_acceleration, dt,
-                                    static_cast<std::uint32_t>(unit_base), &cache.turn_state);
-                            }
-                        }
-                        else if (dt > 0.55f)
-                            cache.have_motion = false;
-                    }
-                    cache.last_position = unit_pos;
-                    cache.last_sample = sample_time;
-                    cache.have_position = true;
-                }
-
-                if (velocity_from_native && air_velocity.length() < 0.5f &&
-                    cache.have_motion && cache.filtered_velocity.length() > 10.0f)
-                    velocity_from_native = false;
-                if (!velocity_from_native && cache.have_motion)
-                    air_velocity = cache.filtered_velocity;
-                if ((!acceleration_from_native ||
-                    (air_acceleration.length() < 0.1f && cache.filtered_acceleration.length() > 5.0f)) &&
-                    cache.have_motion)
-                    air_acceleration = cache.filtered_acceleration;
-                if (!air_lead_model::finite(air_acceleration) || air_acceleration.length() > 160.0f)
-                    air_acceleration = {};
+                air_velocity=motion.velocity;air_acceleration=motion.acceleration;
+                cache.turn_omega=air_lead_model::update_turn_state(air_velocity,air_acceleration,
+                    motion.dt,unit_base,&cache.turn_state);
                 cache.prediction_velocity = air_velocity;
                 cache.prediction_acceleration = air_acceleration;
                 { // already paced by next_sample above
                     const aimbot::BallisticsData local_bal = aimbot::ballisticsData;
                     const float sample_age = std::clamp(
                         std::chrono::duration<float>(now - curr_snapshot.captured_at).count(), 0.0f, 0.20f);
-                    const float delay = sample_age + std::clamp(sdk::air_lead_extra_time, 0.0f, 0.5f);
-                    const float speed = std::isfinite(local_bal.velocity) && local_bal.velocity > 0.0f
-                        ? local_bal.velocity : 300.0f;
-                    const auto solution = air_lead_model::solve(origin, unit_pos, air_velocity,
-                        air_acceleration, speed, local_bal.mass, local_bal.caliber, local_bal.drag,
-                        cache.turn_omega, delay, sdk::air_lead_use_turn_prediction);
+                    const float delay = std::clamp(sdk::air_lead_extra_time, 0.0f, 0.5f);
+                    // Sin datos de munición reales, 300 m/s fabricados desplazaban
+                    // el marcador cientos de metros: ocultarlo en vez de mentir.
+                    if (!std::isfinite(local_bal.velocity) || local_bal.velocity<50.f ||
+                        local_bal.velocity>4000.f) {
+                        cache.initialized=false;
+                        if(!drew_air_lead) sdk::air_lead_status="Municion A2A sin velocidad fiable";
+                        return;
+                    }
+                    const air_intercept::encounter encounter{origin,unit_pos,shooter.sample.velocity,
+                        shooter.sample.acceleration,air_velocity,air_acceleration,shooter.omega,
+                        cache.turn_omega,sample_age,delay,sdk::air_lead_use_turn_prediction,shooter.sample.valid};
+                    const auto solution=air_intercept::solve(encounter,{local_bal.velocity,local_bal.mass,
+                        aimbot::aircraft_ballistics_policy::caliber_for_air_solver(
+                            local_bal.caliber,local_bal.caliber_in_mm),local_bal.drag});
                     if (!solution.valid)
                     {
                         cache.initialized = false;
+                        if(!drew_air_lead) sdk::air_lead_status=air_intercept::reason(solution.status);
                         return;
                     }
+                    if(cache.initialized)cache.prediction_velocity=air_lead_tracking::lead_velocity(
+                        cache.raw_lead_point,solution.point,std::chrono::duration<float>(now-cache.last_update).count(),air_velocity);
+                    // The aim-point derivative is not the target acceleration.
+                    cache.prediction_acceleration={};
                     cache.raw_lead_point = solution.point;
+                    cache.flight_time=solution.time;cache.model_error=solution.error;
+                    cache.own_source=shooter.sample.provenance;cache.target_source=motion.provenance;
 
                     if (!cache.initialized) {
                         cache.smoothed_lead_point = cache.raw_lead_point;
@@ -1589,23 +1603,52 @@ namespace esp
                     {
                         const float size = sdk::air_lead_marker_size;
                         const float thickness = sdk::air_lead_line_thickness;
-                        const ImU32 color = ImGui::ColorConvertFloat4ToU32(sdk::air_lead_sim_color);
-
-                        g_render->circle(lead_screen.x, lead_screen.y, size, color, 16);
+                        ImVec4 lead_color = sdk::air_lead_sim_color;
+                        const float coverage = std::clamp(lead_color.w,0.f,1.f) * std::clamp(sdk::air_lead_opacity,0.f,1.f);
+                        lead_color.w = coverage;
+                        const ImU32 color = ImGui::ColorConvertFloat4ToU32(lead_color);
+                        const bool safe_alpha=sdk::air_lead_coverage_opacity;
+                        auto* draw=g_render->draw_list();
                         const float cross = size * 1.5f;
-                        g_render->line(lead_screen.x - cross, lead_screen.y, lead_screen.x + cross, lead_screen.y, color, thickness);
-                        g_render->line(lead_screen.x, lead_screen.y - cross, lead_screen.x, lead_screen.y + cross, color, thickness);
-
+                        if (safe_alpha) {
+                            lead_opacity::circle(draw,ImVec2(lead_screen.x,lead_screen.y),size,color,coverage);
+                            lead_opacity::line(draw,ImVec2(lead_screen.x-cross,lead_screen.y),
+                                ImVec2(lead_screen.x+cross,lead_screen.y),color,thickness,coverage);
+                            lead_opacity::line(draw,ImVec2(lead_screen.x,lead_screen.y-cross),
+                                ImVec2(lead_screen.x,lead_screen.y+cross),color,thickness,coverage);
+                        } else {
+                            g_render->circle(lead_screen.x, lead_screen.y, size, color, 16);
+                            g_render->line(lead_screen.x-cross,lead_screen.y,lead_screen.x+cross,lead_screen.y,color,thickness);
+                            g_render->line(lead_screen.x,lead_screen.y-cross,lead_screen.x,lead_screen.y+cross,color,thickness);
+                        }
                         vec2_t unit_screen_pos;
                         if (world_to_screen_counted(unit_pos, unit_screen_pos, camera_matrix, projection_ctx, w2s_calls))
                         {
-                            g_render->line(unit_screen_pos.x, unit_screen_pos.y, lead_screen.x, lead_screen.y, color, thickness * 0.7f);
+                            if (safe_alpha)
+                                lead_opacity::line(draw,ImVec2(unit_screen_pos.x,unit_screen_pos.y),
+                                    ImVec2(lead_screen.x,lead_screen.y),color,thickness*.7f,coverage);
+                            else
+                                g_render->line(unit_screen_pos.x,unit_screen_pos.y,lead_screen.x,lead_screen.y,color,thickness*.7f);
                         }
-                    }
+                        drew_air_lead=true;
+                        sdk::air_lead_own_motion_status=air_lead_tracking::label(cache.own_source);
+                        sdk::air_lead_target_motion_status=air_lead_tracking::label(cache.target_source);
+                        sdk::air_lead_flight_time=cache.flight_time;sdk::air_lead_model_error=cache.model_error;
+                        sdk::air_lead_status=cache.own_source!=air_lead_tracking::source::none ? "Dibujando A2A (herencia de velocidad propia)" :
+                            "Dibujando A2A sin compensacion propia (sin muestra fiable)";
+                    } else if(!drew_air_lead)
+                        sdk::air_lead_status="Prediccion A2A fuera de pantalla";
                 }
             }
             };
 
+        if (sdk::aimbot_enabled && frame.local_is_plane)
+            sdk::ground_prediction_status="G2G requiere unidad terrestre local";
+        else if (sdk::aimbot_enabled) sdk::ground_prediction_status = sdk::esp_only_show_planes
+            ? "Only Show Planes oculta los objetivos terrestres"
+            : "Sin objetivo terrestre visible (filtros/FOV/distancia)";
+
+        const auto units_start=std::chrono::steady_clock::now();
         for (c_unit& unit : units)
         {
             vec3_t unit_pos;
@@ -1623,34 +1666,44 @@ namespace esp
             const float dy = unit_pos.y - local_pos.y;
             const float dz = unit_pos.z - local_pos.z;
             const float distance_sq = dx * dx + dy * dy + dz * dz;
-            if (distance_sq > esp_render_distance_sq)
+            if (!frame_policy::in_render_range(distance_sq,esp_render_distance_sq)) {
+                ++cull_distance;
                 continue;
+            }
 
             auto& cached_info = get_cached_unit_info(unit_base, unit);
             const std::string& unit_type = cached_info.unit_type;
-            if (unit_type.empty())
+            if (unit_type.empty()) {
+                ++cull_type;
                 continue;
+            }
 
             const uint16_t raw_type = cached_info.raw_type;
             const auto unit_type_info = get_unit_type_info(unit_type, raw_type);
 
-            if (sdk::esp_only_show_planes && !unit_type_info.is_plane)
+            if (sdk::esp_only_show_planes && !unit_type_info.is_plane) {
+                ++cull_type;
                 continue;
+            }
 
+            vec2_t candidate_screen{};
+            bool candidate_projected=false;
             bool process_air_lead = sdk::air_lead_enabled && sdk::air_lead_use_simulation &&
-                unit_type_info.is_plane && local_team != -1 &&
+                frame.local_is_plane && local_unit_base && unit_type_info.is_plane && local_team != -1 &&
                 is_air_lead_target(unit_type, unit_type_info);
 
             if (process_air_lead)
             {
                 uint8_t team_byte = get_unit_team(unit_base);
-                if (static_cast<int32_t>(team_byte) != local_team)
+                if (team_byte!=0xFF && static_cast<int32_t>(team_byte) != local_team)
                 {
                     if (sdk::air_lead_only_target)
                     {
                         vec2_t sp;
                         if (world_to_screen_counted(unit_pos, sp, camera_matrix, projection_ctx, w2s_calls))
                         {
+                            candidate_screen=sp;
+                            candidate_projected=true;
                             const float dx_center = sp.x - viewport_center.x;
                             const float dy_center = sp.y - viewport_center.y;
                             const float screen_dist_sq = dx_center * dx_center + dy_center * dy_center;
@@ -1671,15 +1724,21 @@ namespace esp
                 }
             }
 
-            if (unit_type_info.is_dummy || !unit_type_info.worth_to_draw)
+            if (unit_type_info.is_dummy || !unit_type_info.worth_to_draw) {
+                ++cull_type;
                 continue;
+            }
 
-            if (!is_point_in_clip_frustum(unit_pos, camera_matrix, projection_ctx))
+            if (!is_point_in_clip_frustum(unit_pos, camera_matrix, projection_ctx)) {
+                ++cull_frustum;
                 continue;
+            }
 
-            vec2_t screen_pos;
-            if (!world_to_screen_counted(unit_pos, screen_pos, camera_matrix, projection_ctx, w2s_calls))
+            vec2_t screen_pos=candidate_screen;
+            if (!candidate_projected && !world_to_screen_counted(unit_pos, screen_pos, camera_matrix, projection_ctx, w2s_calls)) {
+                ++cull_projection;
                 continue;
+            }
 
             const float distance_f = std::sqrt(distance_sq);
             const std::string& vehicle_name = cached_info.vehicle_name;
@@ -1687,11 +1746,18 @@ namespace esp
             const float dy_center = screen_pos.y - viewport_center.y;
             const float screen_dist_sq = dx_center * dx_center + dy_center * dy_center;
             const bool is_inside_fov = (aim_fov_radius_sq > 0.0f) && (screen_dist_sq <= aim_fov_radius_sq);
+
+            if(!unit_type_info.worth_to_draw || distance_sq>esp_render_distance_sq) {
+                ++cull_type; continue;
+            }
             bool show_name_for_unit = true;
             if (distance_sq > far_simplified_distance_sq)
                 show_name_for_unit = is_inside_fov;
 
-            float label_base_y = 0.f;
+            float label_base_y = screen_pos.y; // centro valido aunque la OBB se recorte
+            projected_box_bounds_t projected_box{};
+            const bool needs_reload_box=reload_display_policy::eligible(sdk::esp_show_reload,
+                unit_type_info.show_reload,distance_sq,esp_render_distance_sq);
 
             const bool should_draw_any_box = sdk::esp_show_boxes || sdk::esp_use_3d_boxes;
             if (unit_type_info.draw_box && should_draw_any_box)
@@ -1728,14 +1794,20 @@ namespace esp
                             for (size_t i = 1; i < 8; ++i)
                                 box_bottom_y = std::max(box_bottom_y, sc[i].y);
 
-                            label_base_y = box_bottom_y;
+                            label_base_y = frame_policy::label_anchor(screen_pos.y,box_bottom_y,true);
                             draw_wireframe_box(sc, unit_type_info.color, 1.f);
+                            if (needs_reload_box)
+                                projected_box=projected_bounds_from_screen_corners(sc);
+                        }
+                        else {
+                            ++partial_boxes; // la caja incompleta no se dibuja, la etiqueta si
                         }
                     }
                     else if (sdk::esp_show_boxes)
                     {
                         float projected_max_y = 0.0f;
-                        if (draw_projected_2d_box_from_obb(unit, unit_pos, distance_f, camera_matrix, projection_ctx, w2s_calls, obb_calls, unit_type_info.color, &projected_max_y))
+                        if (draw_projected_2d_box_from_obb(unit, unit_pos, distance_f, camera_matrix, projection_ctx, w2s_calls, obb_calls, unit_type_info.color, &projected_max_y,
+                            needs_reload_box ? &projected_box : nullptr))
                             label_base_y = projected_max_y;
                     }
                 }
@@ -1778,7 +1850,19 @@ namespace esp
                 }
             }
 
-            const bool allow_aimbot_for_unit = unit_type_info.draw_box && !unit_type_info.is_plane;
+            if(sdk::esp_show_invulnerable && offsets::invulnerable_offset_available &&
+                invulnerability_display_policy::tank_type(unit_type,raw_type) &&
+                distance_sq<=sdk::esp_invul_distance*sdk::esp_invul_distance &&
+                unit_base!=local_unit_base && main_viewport &&
+                screen_pos.x>=main_viewport->Pos.x+6.f && screen_pos.y>=main_viewport->Pos.y+6.f &&
+                screen_pos.x<main_viewport->Pos.x+main_viewport->Size.x-6.f &&
+                screen_pos.y<main_viewport->Pos.y+main_viewport->Size.y-6.f)
+                invul_candidates.push_back({unit_base,screen_pos,distance_sq});
+
+            if (needs_reload_box)
+                reload_candidates.push_back({unit_base,screen_pos,distance_sq,unit,unit_pos,distance_f,projected_box});
+
+            const bool allow_aimbot_for_unit = !frame.local_is_plane && unit_type_info.draw_box && !unit_type_info.is_plane;
             if (sdk::aimbot_enabled && allow_aimbot_for_unit && distance_sq <= ballistic_render_distance_sq)
             {
                 if (aim_fov_radius_sq > 0.0f && screen_dist_sq <= aim_fov_radius_sq)
@@ -1788,9 +1872,6 @@ namespace esp
                     {
                         best_aimbot_unit = unit;
                         best_aimbot_pos = unit_pos;
-                        best_aimbot_screen_pos = screen_pos;
-                        best_aimbot_distance_f = distance_f;
-                        best_aimbot_color = unit_type_info.color;
                         best_aimbot_score = score;
                         has_best_aimbot_target = true;
                     }
@@ -1803,7 +1884,7 @@ namespace esp
                 {
                     uint8_t team_byte = get_unit_team(unit_base);
                     int32_t team = static_cast<int32_t>(team_byte);
-                    if (team != local_team)
+                    if (team_byte!=0xFF && team != local_team)
                     {
                         float score = screen_dist_sq + distance_sq * 0.05f;
                         if (!has_xray_target || score < best_xray_score)
@@ -1819,6 +1900,9 @@ namespace esp
             }
         }
 
+        misc::prof_esp_units_us.store(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-units_start).count()),std::memory_order_relaxed);
         if (sdk::air_lead_only_target && has_best_air_lead_target)
         {
             run_air_lead(best_air_lead_unit, best_air_lead_pos);
@@ -1844,46 +1928,108 @@ namespace esp
             }
         }
 
+
+        const auto xray_start=std::chrono::steady_clock::now();
         if (has_xray_target)
             draw_xray_modules(best_xray_unit, best_xray_pos, camera_matrix, projection_ctx, w2s_calls, best_xray_distance_f);
+        misc::prof_esp_xray_us.store(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-xray_start).count()),std::memory_order_relaxed);
 
-        if (sdk::esp_show_reload && has_best_aimbot_target)
-        {
-            const uint8_t reload = get_cached_reload_info(best_aimbot_unit.get_base(), best_aimbot_unit).value;
-            constexpr float stat = (10.f / 16);
-            constexpr float reload_ticks_max = 16.0f;
-            const float seconds = stat * reload;
-            char buf[16];
-            std::snprintf(buf, sizeof(buf), "%.1fs", seconds);
-
-            const float clamped_reload = std::min(static_cast<float>(reload), reload_ticks_max);
-            const float fill_ratio = std::clamp(1.0f - (clamped_reload / reload_ticks_max), 0.0f, 1.0f);
-
-            const auto bounds = get_projected_box_bounds(best_aimbot_unit, best_aimbot_pos, best_aimbot_distance_f, camera_matrix, projection_ctx, w2s_calls, obb_calls);
-            if (bounds.valid)
-            {
-                const float bar_x = bounds.max_x + 4.0f;
-                const float bar_top = bounds.min_y;
-                const float bar_bottom = bounds.max_y;
-                const float bar_height = std::max(1.0f, bar_bottom - bar_top);
-                const float fill_height = bar_height * fill_ratio;
-
-                g_render->line(bar_x, bar_top, bar_x, bar_top + bar_height, IM_COL32(35, 35, 35, 220), 1.0f);
-                g_render->line(bar_x, bar_top + bar_height, bar_x, bar_top + bar_height - fill_height, IM_COL32(40, 220, 40, 255), 1.0f);
-
-                if (sdk::esp_show_reload_seconds)
-                    g_render->text({ bar_x, bar_top - 18.0f }, best_aimbot_color, 0, buf, esp_font, sdk::esp_font_size_reload);
-            }
-            else
-            {
-                if (sdk::esp_show_reload_seconds)
-                {
-                    const float text_y = best_aimbot_screen_pos.y + 24.0f;
-                    g_render->text({ best_aimbot_screen_pos.x, text_y }, best_aimbot_color, 0, buf, esp_font, sdk::esp_font_size_reload);
+        // Independiente de G2G/FOV/caja 3D: una lectura visual por enemigo
+        // cercano, limitada para no multiplicar DMA en cada frame.
+        const auto reload_start=std::chrono::steady_clock::now();
+        misc::prof_reload_candidates.store(reload_candidates.size(),std::memory_order_relaxed);
+        if (sdk::esp_show_reload && !reload_candidates.empty()) {
+            const auto count=(std::min)(reload_candidates.size(),reload_display_policy::max_indicators);
+            std::partial_sort(reload_candidates.begin(),reload_candidates.begin()+count,
+                reload_candidates.end(),[](const auto& a,const auto& b) {
+                    return a.distance_sq<b.distance_sq;
+                });
+            uint64_t drawn=0,failed=0,unexpected=0;
+            for (std::size_t i=0;i<count;++i) {
+                auto& target=reload_candidates[i];
+                const auto& visual=get_cached_reload_info(target.base);
+                if (!visual.valid) {++failed;continue;}
+                if (misc::prof_reload_sample.load(std::memory_order_relaxed)<0)
+                    misc::prof_reload_sample.store(visual.value,std::memory_order_relaxed);
+                if (!reload_display_policy::supported_visual_value(visual.value)) {
+                    ++unexpected; // exponer lectura incoherente sin inventar tiempo
+                    if (sdk::esp_show_reload_seconds) {
+                        char raw_label[24];
+                        std::snprintf(raw_label,sizeof(raw_label),"Raw %u",unsigned(visual.value));
+                        g_render->text({target.screen.x+18.f,target.screen.y-24.f},
+                            IM_COL32(255,190,95,255),0,raw_label,esp_font,sdk::esp_font_size_reload);
+                    }
+                    continue;
                 }
+                // Ubicación clásica: barra fina junto a la caja proyectada, no una
+                // columna fija de 34 px flotando junto al centro del vehículo.
+                // La caja ya proyectada en este frame evita repetir 8 esquinas.
+                const auto box=target.cached_box.valid ? target.cached_box :
+                    get_projected_box_bounds(target.unit,target.position,
+                        target.distance_m,camera_matrix,projection_ctx,w2s_calls,obb_calls);
+                if (!box.valid) {++failed;continue;}
+                const float height=box.max_y-box.min_y;
+                if (!std::isfinite(height) || height<3.f) {++failed;continue;}
+                float bar_x=box.max_x+4.f;
+                if (main_viewport && bar_x>main_viewport->Pos.x+main_viewport->Size.x-5.f)
+                    bar_x=box.min_x-5.f;
+                const float fraction=reload_display_policy::ready_fraction(visual.value);
+                g_render->line(bar_x,box.min_y,bar_x,box.max_y,IM_COL32(0,0,0,210),4.f);
+                g_render->line(bar_x,box.max_y,bar_x,box.max_y-height*fraction,
+                    IM_COL32(0,215,45,255),2.f);
+                if (sdk::esp_show_reload_seconds) {
+                    char label[24];
+                    std::snprintf(label,sizeof(label),"%.1fs",(10.f/16.f)*visual.value);
+                    g_render->text({bar_x+5.f,box.min_y-14.f},IM_COL32(255,255,255,255),
+                        0,label,esp_font,sdk::esp_font_size_reload);
+                }
+                ++drawn;
             }
+            misc::prof_reload_drawn.store(drawn,std::memory_order_relaxed);
+            misc::prof_reload_failed.store(failed,std::memory_order_relaxed);
+            misc::prof_reload_unexpected.store(unexpected,std::memory_order_relaxed);
         }
 
+        misc::prof_esp_reload_us.store(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-reload_start).count()),std::memory_order_relaxed);
+        const auto invul_start=std::chrono::steady_clock::now();
+        misc::prof_invul_candidates.store(invul_candidates.size(),std::memory_order_relaxed);
+        if (!invul_candidates.empty()) {
+            const auto count=(std::min)(invul_candidates.size(),
+                invulnerability_display_policy::max_indicators);
+            std::partial_sort(invul_candidates.begin(),invul_candidates.begin()+count,
+                invul_candidates.end(),[](const auto& a,const auto& b){return a.distance_sq<b.distance_sq;});
+            uint64_t shown=0,failed=0,invalid=0,timers=0;
+            for(std::size_t i=0;i<count;++i) {
+                const auto& target=invul_candidates[i];
+                const auto& state=get_cached_invulnerability(target.base);
+                if(state.invalid_flag) {++invalid;continue;}
+                if(!state.flag_valid) {++failed;continue;}
+                if(!state.invulnerable) continue; // el timer no decide el estado
+                char label[64];
+                if(sdk::esp_invul_show_timer && state.timer_valid) {
+                    std::snprintf(label,sizeof(label),"INVUL %.1f",state.timer);
+                    ++timers;
+                } else {
+                    std::snprintf(label,sizeof(label),"INVUL");
+                }
+                g_render->text({target.screen.x+7.f,target.screen.y-19.f},
+                    ImGui::ColorConvertFloat4ToU32(sdk::color_invulnerable),
+                    0,label,esp_font,std::clamp(sdk::esp_font_size_invul,8.f,18.f));
+                ++shown;
+            }
+            misc::prof_invul_shown.store(shown,std::memory_order_relaxed);
+            misc::prof_invul_failed.store(failed,std::memory_order_relaxed);
+            misc::prof_invul_invalid.store(invalid,std::memory_order_relaxed);
+            misc::prof_invul_timer_shown.store(timers,std::memory_order_relaxed);
+        }
+
+        misc::prof_esp_invul_us.store(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-invul_start).count()),std::memory_order_relaxed);
         if (sdk::aimbot_enabled && has_best_aimbot_target)
         {
             const auto aimbot_start = std::chrono::steady_clock::now();
@@ -1917,5 +2063,10 @@ namespace esp
         misc::prof_aimbot_calls.store(aimbot_calls, std::memory_order_relaxed);
         misc::prof_esp_w2s_calls.store(static_cast<uint64_t>(w2s_calls), std::memory_order_relaxed);
         misc::prof_esp_obb_calls.store(static_cast<uint64_t>(obb_calls), std::memory_order_relaxed);
+        misc::prof_esp_cull_distance.store(cull_distance,std::memory_order_relaxed);
+        misc::prof_esp_cull_type.store(cull_type,std::memory_order_relaxed);
+        misc::prof_esp_cull_frustum.store(cull_frustum,std::memory_order_relaxed);
+        misc::prof_esp_cull_projection.store(cull_projection,std::memory_order_relaxed);
+        misc::prof_esp_partial_boxes.store(partial_boxes,std::memory_order_relaxed);
     }
 }   // namespace esp

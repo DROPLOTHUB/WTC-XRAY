@@ -15,6 +15,8 @@ namespace esp::air_lead_model
     // solve() crece linealmente con este valor (barrido + bisección).
     // 4 s cubre ~3.2 km a 800 m/s; súbelo si necesitas tiros más largos.
     inline constexpr float kMaxHorizonSeconds = 4.0f;
+    // A 0.25 s bracket / 2^15 is under 8 microseconds.
+    inline constexpr int kBisectionIterations = 15;
 
     // Omega máxima soportada (rad/s). ~143°/s.
     inline constexpr float kMaxOmega = 2.5f;
@@ -53,7 +55,7 @@ namespace esp::air_lead_model
 
     struct TurnState
     {
-        std::uint32_t owner_uid = 0;
+        std::uint64_t owner_uid = 0;
         float         omega = 0.0f;
         float         last_dt = 0.1f;
         bool          valid = false;
@@ -70,10 +72,10 @@ namespace esp::air_lead_model
     // MISMO uid, no el frame_dt global.
     // ========================================================================
     inline float update_turn_state(const vec3_t& vel, const vec3_t& acceleration,
-        float dt_s, std::uint32_t owner_uid,
+        float dt_s, std::uint64_t owner_uid,
         TurnState* state)
     {
-        if (!state || !finite(vel) || !finite(acceleration))
+        if (!state || !finite(vel) || !finite(acceleration) || !std::isfinite(dt_s) || dt_s<=0.f)
             return 0.0f;
 
         const float speed_sq =
@@ -97,14 +99,13 @@ namespace esp::air_lead_model
         float along =
             (vel.x * acceleration.x + vel.y * acceleration.y +
                 vel.z * acceleration.z) / speed;
-        along = (std::clamp)(along, -kMaxAlong, kMaxAlong);
 
         const float an_x = acceleration.x - along * v_hat_x;
         const float an_y = acceleration.y - along * v_hat_y;
         const float an_z = acceleration.z - along * v_hat_z;
         const float an_mag = std::sqrt(an_x * an_x + an_y * an_y + an_z * an_z);
 
-        const float omega_instant = an_mag / speed;
+        const float omega_instant = (std::clamp)(an_mag / speed,0.f,kMaxOmega);
 
         // EMA time-invariant: alpha = 1 - exp(-dt/tau).
         const float dt_safe = (std::clamp)(dt_s, 0.001f, 1.0f);
@@ -138,131 +139,58 @@ namespace esp::air_lead_model
     // velocidad alrededor del eje (v × a) mediante Rodrigues; el horizonte de
     // validez de la aceleración limita también la rotación.
     // ========================================================================
-    inline vec3_t propagate(const vec3_t& pos, const vec3_t& vel,
-        const vec3_t& acceleration, float seconds,
-        float omega, bool turn = false)
+    struct motion_t {vec3_t point{},velocity{};};
+    inline motion_t propagate_state(const vec3_t& pos,const vec3_t& vel,
+        const vec3_t& acceleration,float seconds,float omega,bool turn=false)
     {
-        if (!finite(pos) || !finite(vel) || !finite(acceleration))
-            return pos;
-
-        // Saturación defensiva de ω (incluye NaN).
-        if (!std::isfinite(omega))
-            omega = 0.0f;
-        else
-            omega = (std::clamp)(omega, 0.0f, kMaxOmega);
-
-        seconds = (std::clamp)(seconds, 0.0f, 8.0f);
-        const float active = (std::min)(seconds, 0.85f);
-
-        const float speed_sq =
-            vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
-
-        // Trayectoria lineal (fallback y caso sin giro). Solo se calcula
-        // cuando se va a usar.
-        const auto linear_trajectory = [&]() {
-            const float lin_x =
-                acceleration.x * (active * (seconds - 0.5f * active));
-            const float lin_y =
-                acceleration.y * (active * (seconds - 0.5f * active));
-            const float lin_z =
-                acceleration.z * (active * (seconds - 0.5f * active));
-            return vec3_t{
-                pos.x + vel.x * seconds + lin_x,
-                pos.y + vel.y * seconds + lin_y,
-                pos.z + vel.z * seconds + lin_z
-            };
-            };
-
-        if (!turn || speed_sq < 400.0f || omega < 1e-4f)
-            return linear_trajectory();
-
-        const float speed = std::sqrt(speed_sq);
-        const float v_hat_x = vel.x / speed;
-        const float v_hat_y = vel.y / speed;
-        const float v_hat_z = vel.z / speed;
-
-        // Componente tangencial (cambia |v|).
-        float along =
-            (vel.x * acceleration.x + vel.y * acceleration.y +
-                vel.z * acceleration.z) / speed;
-        along = (std::clamp)(along, -kMaxAlong, kMaxAlong);
-
-        // Eje de rotación = v × a. Perpendicular a v y a a_normal.
-        const float ax_x = vel.y * acceleration.z - vel.z * acceleration.y;
-        const float ax_y = vel.z * acceleration.x - vel.x * acceleration.z;
-        const float ax_z = vel.x * acceleration.y - vel.y * acceleration.x;
-        const float ax_mag = std::sqrt(ax_x * ax_x + ax_y * ax_y + ax_z * ax_z);
-
-        if (ax_mag < 1e-4f)
-            return linear_trajectory();
-
-        const float axis_x = ax_x / ax_mag;
-        const float axis_y = ax_y / ax_mag;
-        const float axis_z = ax_z / ax_mag;
-
-        // Suelo de velocidad: NO acelera objetivos lentos, solo evita que
-        // |v| cruce cero si `along` es muy negativo.
-        const float speed_floor = (std::min)(kMinSpeedFloor, speed);
-
-        float rx = pos.x, ry = pos.y, rz = pos.z;
-        float cvx = vel.x, cvy = vel.y, cvz = vel.z;
-        float elapsed = 0.0f;
-
-        while (elapsed < seconds)
-        {
-            const bool in_active = (elapsed < active);
-
-            float dt;
-            if (in_active)
-            {
-                dt = (std::min)((std::min)(0.05f, active - elapsed),
-                    seconds - elapsed);
-            }
-            else
-            {
-                dt = seconds - elapsed; // un solo salto recto tras el activo
-            }
-            if (dt < 1e-6f)
-                break;
-
-            if (in_active)
-            {
-                const float mid = elapsed + 0.5f * dt;
-                const float turn_time = (std::min)(mid, active);
-                const float target_speed =
-                    (std::max)(speed_floor, speed + along * turn_time);
-
-                const float angle = omega * dt;
-                const float c = std::cos(angle);
-                const float s = std::sin(angle);
-
-                // Rodrigues: v' = v·c + (axis × v)·s + axis·(axis·v)·(1-c)
-                const float cross_x = axis_y * cvz - axis_z * cvy;
-                const float cross_y = axis_z * cvx - axis_x * cvz;
-                const float cross_z = axis_x * cvy - axis_y * cvx;
-
-                const float dot = axis_x * cvx + axis_y * cvy + axis_z * cvz;
-
-                float nvx = cvx * c + cross_x * s + axis_x * dot * (1.0f - c);
-                float nvy = cvy * c + cross_y * s + axis_y * dot * (1.0f - c);
-                float nvz = cvz * c + cross_z * s + axis_z * dot * (1.0f - c);
-
-                const float n_mag = std::sqrt(nvx * nvx + nvy * nvy + nvz * nvz);
-                if (n_mag > 1e-4f)
-                {
-                    const float scale = target_speed / n_mag;
-                    nvx *= scale; nvy *= scale; nvz *= scale;
-                }
-                cvx = nvx; cvy = nvy; cvz = nvz;
-            }
-
-            rx += cvx * dt;
-            ry += cvy * dt;
-            rz += cvz * dt;
-            elapsed += dt;
+        motion_t out{pos,vel};
+        if(!finite(pos)||!finite(vel)||!finite(acceleration)||!std::isfinite(seconds))return out;
+        omega=std::isfinite(omega) ? (std::clamp)(omega,0.f,kMaxOmega) : 0.f;
+        seconds=(std::clamp)(seconds,0.f,8.f);
+        const float active=(std::min)(seconds,.85f);
+        const float speed_sq=vel.x*vel.x+vel.y*vel.y+vel.z*vel.z;
+        const auto linear=[&]() {
+            const float distance=active*(seconds-.5f*active);
+            return motion_t{{pos.x+vel.x*seconds+acceleration.x*distance,
+                pos.y+vel.y*seconds+acceleration.y*distance,pos.z+vel.z*seconds+acceleration.z*distance},
+                {vel.x+acceleration.x*active,vel.y+acceleration.y*active,vel.z+acceleration.z*active}};
+        };
+        if(!turn||speed_sq<400.f||omega<1e-4f)return linear();
+        const double speed=std::sqrt(static_cast<double>(speed_sq));
+        const double ax=double(vel.y)*acceleration.z-double(vel.z)*acceleration.y;
+        const double ay=double(vel.z)*acceleration.x-double(vel.x)*acceleration.z;
+        const double az=double(vel.x)*acceleration.y-double(vel.y)*acceleration.x;
+        const double magnitude=std::sqrt(ax*ax+ay*ay+az*az);
+        if(magnitude<1e-4)return linear();
+        const double ux=vel.x/speed,uy=vel.y/speed,uz=vel.z/speed;
+        const double nx=ax/magnitude,ny=ay/magnitude,nz=az/magnitude;
+        const double tx=ny*uz-nz*uy,ty=nz*ux-nx*uz,tz=nx*uy-ny*ux;
+        const double along=(std::clamp)(ux*acceleration.x+uy*acceleration.y+uz*acceleration.z,
+            -double(kMaxAlong),double(kMaxAlong));
+        const double floor=(std::min)(double(kMinSpeedFloor),speed);
+        const double ramp=along<0 ? (std::min)(double(active),(speed-floor)/-along) : double(active);
+        const double w=omega,theta=w*ramp;
+        const double sine=std::sin(theta),cosine=std::cos(theta);
+        // Exact integrals of (speed + along*t) rotated around v x a.
+        // Double precision avoids cancellation for nearly straight flight.
+        double forward=speed*sine/w+along*(ramp*sine/w+(cosine-1)/(w*w));
+        double sideways=speed*(1-cosine)/w+along*(-ramp*cosine/w+sine/(w*w));
+        const double angle=w*active,c=std::cos(angle),s=std::sin(angle);
+        if(ramp<active) {
+            forward+=floor*(s-sine)/w;
+            sideways+=floor*(cosine-c)/w;
         }
-
-        return vec3_t{ rx, ry, rz };
+        const double final_speed=(std::max)(floor,speed+along*active);
+        const double vx=final_speed*(ux*c+tx*s),vy=final_speed*(uy*c+ty*s),vz=final_speed*(uz*c+tz*s);
+        const double coast=seconds-active;
+        out.point={float(pos.x+ux*forward+tx*sideways+vx*coast),
+            float(pos.y+uy*forward+ty*sideways+vy*coast),float(pos.z+uz*forward+tz*sideways+vz*coast)};
+        out.velocity={float(vx),float(vy),float(vz)};
+        return out;
+    }
+    inline vec3_t propagate(const vec3_t& pos,const vec3_t& velocity,
+        const vec3_t& acceleration,float seconds,float omega,bool turn=false) {
+        return propagate_state(pos,velocity,acceleration,seconds,omega,turn).point;
     }
 
     // ========================================================================
@@ -285,7 +213,7 @@ namespace esp::air_lead_model
     {
         solution_t out{};
         if (!finite(origin) || !finite(target) || !finite(velocity) ||
-            !finite(acceleration) ||
+            !finite(acceleration) || !std::isfinite(prelaunch_seconds) || !std::isfinite(omega) ||
             !std::isfinite(muzzle_speed) || muzzle_speed < 50.0f ||
             muzzle_speed > 4000.0f)
             return out;
@@ -354,7 +282,7 @@ namespace esp::air_lead_model
         if (hi == 0.0f)
             return out; // fuera del horizonte kMaxHorizonSeconds
 
-        for (int i = 0; i < 22; ++i)
+        for (int i = 0; i < kBisectionIterations; ++i)
         {
             const float mid = 0.5f * (lo + hi);
             if (residual(mid) > 0.0f)

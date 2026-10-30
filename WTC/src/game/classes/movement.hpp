@@ -16,7 +16,7 @@ public:
     }
 
     auto velocity() -> vec3_t {
-        return TargetProcess->Read<vec3_t>(this->container_address + 0x5C);
+        return TargetProcess->Read<vec3_t>(this->container_address + offsets::unit_offsets::groundmovement_velocity_offset);
     }
 
 private:

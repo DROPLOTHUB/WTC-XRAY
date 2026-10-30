@@ -5,6 +5,7 @@
 #include <thread>
 #include <algorithm>
 #include "runtime_context.hpp"
+#include "../game/offsets.hpp"
 
 namespace core
 {
@@ -103,21 +104,14 @@ namespace core
             return false;
         }
 
-        offsets::initialize_external_offsets();
-
-        if (!update::run())
-        {
-            LOG("Failed to update sdk.\n");
-            return false;
+        LOG("[SDK INIT] Using built-in offsets (RVA 0x%zx).\n", offsets::cgame_offset);
+        if(sdk::init()) {
+            LOG("[SDK INIT] Successfully initialized with built-in offsets.\n");
+            return true;
         }
-
-        if (!sdk::init())
-        {
-            LOG("Failed to initialize sdk.\n");
-            return false;
-        }
-
-        return true;
+        LOG("Failed to initialize sdk: %s (cGame RVA 0x%zx).\n",
+            sdk::startup_error,offsets::cgame_offset);
+        return false;
     }
 
     inline auto RestartRuntime() -> bool
@@ -185,8 +179,9 @@ namespace core
                 runtime_connected.store(false);
                 next_battle_state_poll_tick.store(0, std::memory_order_relaxed);
                 misc::reset_runtime_cache();
-                sdk::manual_reload_status = "Reconnect failed";
-                set_runtime_state(runtime_state_t::Disconnected, "reload failed");
+                sdk::manual_reload_status = "SDK offsets invalid; update game version";
+                next_reconnect_attempt_tick.store(GetTickCount64() + 30000, std::memory_order_relaxed);
+                set_runtime_state(runtime_state_t::Disconnected, "reload failed; retry 30s");
                 return;
             }
 

@@ -4,14 +4,12 @@
 
 #include <array>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <string>
 #include <unordered_map>
 
 // ============================================================================
-//   OFFSETS — War Thunder aces.exe 2.59.0.54
-//   Dump autoritativo: {.txt (2026-10) + doc monkrel (2.58+ packed damage model)
+//   OFFSETS — tabla mas reciente suministrada por el usuario; build exacta no indicada.
+//   Integracion comprobada por compilacion, no validada en memoria del juego.
 //   Estructura: [SECCIÓN N] para navegación rápida
 // ============================================================================
 
@@ -22,43 +20,41 @@ namespace offsets
     // ========================================================================
     namespace Global
     {
-        // Valores verificados en partida contra los logs (selector 311 / 318).
-        // Los del JSON (0x7A024E0 / 0x7A00FA0 / 0x7E677A8) producen un selector
-        // basura y la lectura del record falla: no se dibuja ningun misil.
-        inline uintptr_t g_RocketListIndexPtr = 0x7A02490;
-        inline uintptr_t g_BombListIndexPtr = 0x7A00F50;
-        inline uintptr_t g_EntityManager = 0x7E67768;
+        // Selectores y manager de la tabla global suministrada mas recientemente.
+        inline uintptr_t g_RocketListIndexPtr = 0x7A24860;
+        inline uintptr_t g_BombListIndexPtr = 0x7A23320;
+        inline uintptr_t g_EntityManager = 0x7E89BE8;
     }
 
-    inline uintptr_t alllistdata_offset = 0x7E677A8;
-    inline uintptr_t bomb_index = 0x7A00F50;
-    inline uintptr_t cgame_offset = 0x7A26348;
-    inline uintptr_t hud_offset = 0x7A25970;
-    inline uintptr_t localplayer_offset = 0x79FD928;
-    inline uintptr_t my_unit_offset = 0x7A282F0;
-    inline uintptr_t rocket_index = 0x7A02490;
-    inline uintptr_t is_scoping_offset = 0x7A6F55C;
-    inline uintptr_t screen_width_offset = 0x7E6C550;
-    inline uintptr_t view_matrix_offset = 0x7A803B8;
-    inline uintptr_t view_angles_offset = 0x7A2AE58;
+    inline uintptr_t alllistdata_offset = 0x7E89BE8;
+    inline uintptr_t bomb_index = 0x7A23320;
+    inline uintptr_t cgame_offset = 0x7A48848;
+    inline uintptr_t hud_offset = 0x7A47E70;
+    inline uintptr_t localplayer_offset = 0x7A1FCB0;
+    inline uintptr_t my_unit_offset = 0x7A4A7F8;
+    inline uintptr_t rocket_index = 0x7A24860;
+    inline uintptr_t is_scoping_offset = 0x7A91A6C;
+    inline uintptr_t screen_width_offset = 0x7E8E950;
+    inline uintptr_t view_matrix_offset = 0x7AA28B8;
+    inline uintptr_t view_angles_offset = 0x7A4D368;
 
-    inline uintptr_t proj_ballistics_props_positive_offset = 0x7A0B060;
-    inline uintptr_t proj_ballistics_props_negative_offset = 0x7A0B0C8;
-    inline uintptr_t bullet_props_positive_offset = 0x7A14390;
-    inline uintptr_t bullet_props_negative_offset = 0x7A143F8;
+    inline uintptr_t proj_ballistics_props_positive_offset = 0x7A2D3E0;
+    inline uintptr_t proj_ballistics_props_negative_offset = 0x7A2D448;
+    inline uintptr_t bullet_props_positive_offset = 0x7A36890;
+    inline uintptr_t bullet_props_negative_offset = 0x7A368F8;
 
-    inline uintptr_t air_prediction_bool_offset = 0x7E8ED20;
-    inline uintptr_t game_font_list_offset = 0x7F410E8;
-    inline uintptr_t game_optics_offset = 0x7A281C0;
-    inline uintptr_t localization_info_offset = 0x7E690E0;
-    inline uintptr_t map_drawn_this_frame_offset = 0x7A737AC;
-    inline uintptr_t map_full_world_center_offset = 0x7A737C0;
-    inline uintptr_t map_full_world_size_offset = 0x79297A0;
-    inline uintptr_t map_minimap_pos_offset = 0x7929790;
-    inline uintptr_t map_minimap_size_offset = 0x7929798;
-    inline uintptr_t map_view_size_offset = 0x7929788;
-    inline uintptr_t map_world_center_offset = 0x7A737B0;
-    inline uintptr_t tactical_map_obj_offset = 0x7A74858;
+    inline uintptr_t air_prediction_bool_offset = 0x7EB1120;
+    inline uintptr_t game_font_list_offset = 0x7F639A8;
+    inline uintptr_t game_optics_offset = 0x7A4A6C8;
+    inline uintptr_t localization_info_offset = 0x7E8B520;
+    inline uintptr_t map_drawn_this_frame_offset = 0x7A95CAC;
+    inline uintptr_t map_full_world_center_offset = 0x7A95CC0;
+    inline uintptr_t map_full_world_size_offset = 0x794B7A0;
+    inline uintptr_t map_minimap_pos_offset = 0x794B790;
+    inline uintptr_t map_minimap_size_offset = 0x794B798;
+    inline uintptr_t map_view_size_offset = 0x794B788;
+    inline uintptr_t map_world_center_offset = 0x7A95CB0;
+    inline uintptr_t tactical_map_obj_offset = 0x7A76918; // No incluido en la ultima tabla: valor anterior, pendiente de validar.
 
     namespace tactical_map_offsets
     {
@@ -68,22 +64,22 @@ namespace offsets
         inline uintptr_t bounds_max = 0x517C;
         inline uintptr_t mode_stride = 72;
     }
-    inline uintptr_t name_map_offset = 0x7A25168;
-    inline uintptr_t reload_offset1 = 0x7E67830;
-    inline uintptr_t reload_offset2 = 0x7E67828;
-    inline uintptr_t reload_offset3 = 0x79F47BC;
-    inline uintptr_t reload_offset4 = 0x7E67930;
-    inline uintptr_t reload_offset5 = 0x7E67920;
-    inline uintptr_t reload_offset6 = 0x7E679B8;
-    inline uintptr_t reload_offset7 = 0x7E67928;
-    inline uintptr_t ui_pos_arr_offset = 0x7A72768;
-    inline uintptr_t function_das_get_usefull_total_time = 0xAC44A0;
+    inline uintptr_t name_map_offset = 0x7A47668;
+    inline uintptr_t reload_offset1 = 0x7E89C70;
+    inline uintptr_t reload_offset2 = 0x7E89C68;
+    inline uintptr_t reload_offset3 = 0x7A168EC;
+    inline uintptr_t reload_offset4 = 0x7E89D70;
+    inline uintptr_t reload_offset5 = 0x7E89D60;
+    inline uintptr_t reload_offset6 = 0x7E89DF8;
+    inline uintptr_t reload_offset7 = 0x7E89D68;
+    inline uintptr_t ui_pos_arr_offset = 0x7A94C68;
+    inline uintptr_t function_das_get_usefull_total_time = 0xAC96A0;
 
-    inline uintptr_t base_game_version_str = 0x7A2BA88;
-    inline uintptr_t clock_obj = 0x79FFE30;
-    inline uintptr_t game_difficulty = 0x7990D18;
-    inline uintptr_t is_in_hangar_offset = 0x7A11CCB;
-    inline uintptr_t function_rayhit_normalized = 0x34481A0;
+    inline uintptr_t base_game_version_str = 0x7A4DF98;
+    inline uintptr_t clock_obj = 0x7A221B0;
+    inline uintptr_t game_difficulty = 0x79B2D18;
+    inline uintptr_t is_in_hangar_offset = 0x7A3404B;
+    inline uintptr_t function_rayhit_normalized = 0x3461310;
 
     // ========================================================================
     // [SECCIÓN 2] CGAME
@@ -115,11 +111,11 @@ namespace offsets
         namespace ballistic_offsets
         {
             inline uintptr_t bomb_prediction_offset = 0x1CCC;
-            inline uintptr_t round_caliber_offset = 0x2128;
-            inline uintptr_t round_length_offset = 0x212C;
-            inline uintptr_t round_mass_offset = 0x2124;
-            inline uintptr_t round_velocity_offset = 0x2118;
-            inline uintptr_t max_dist = 0x2130;
+            inline uintptr_t round_caliber_offset = 0x2150;
+            inline uintptr_t round_length_offset = 0x2154;
+            inline uintptr_t round_mass_offset = 0x214C;
+            inline uintptr_t round_velocity_offset = 0x2140;
+            inline uintptr_t max_dist = 0x2158;
             inline uintptr_t telecontrol_offset = 0xCD0;
 
             inline uintptr_t& velocity = round_velocity_offset;
@@ -255,8 +251,9 @@ namespace offsets
         inline uintptr_t farthestExitZoneId_offset = 0xFC0;
         inline uintptr_t fpvRocketCameraControlEnabled_offset = 0x1110;
         inline uintptr_t fuseModeIndex_offset = 0x1B50;
-        inline uintptr_t groundmovement_offset = 0x2000;
-        inline uintptr_t ground_velocity_offset = 0x2100;
+        inline uintptr_t ground_velocity_offset = 0x2100; // Unit.m_Velocity: puntero, NO vec3_t
+        inline uintptr_t& groundmovement_offset = ground_velocity_offset; // getter antiguo: mismo puntero
+        inline uintptr_t groundmovement_velocity_offset = 0x5C; // GroundMovement.m_Velocity
         inline uintptr_t hasModuleEffectsToRepair_offset = 0x8E0;
         inline uintptr_t isAlternativeShotFreq_offset = 0x1F0;
         inline uintptr_t isBreechDamaged_offset = 0x8B8;
@@ -437,9 +434,28 @@ namespace offsets
     }
 
     // ========================================================================
-    // [SECCIÓN 11] REGISTRY
+    // [SECCIÓN 11] PROYECTILES / NOMENCLATURA
     // ========================================================================
-    inline bool use_external_offsets_file = false;
+    namespace projectile_offsets
+    {
+        inline uintptr_t missile_name_type = 0x870; // MissileNameCont::m_Type
+        inline uintptr_t missile_name_container = 0x720;
+        inline uintptr_t bomb_name_container = 0x718;
+        inline uintptr_t bomb_name_text = 0x10;
+        inline uintptr_t position = 0x2C0;
+        inline uintptr_t velocity = 0x2DC;
+        inline uintptr_t owner = 0x58;
+    }
+
+    // ========================================================================
+    // [SECCIÓN 12] REGISTRY
+    // ========================================================================
+    // Presencia en la tabla local; las lecturas siguen requiriendo validacion.
+    inline const bool reload_offset_available = unit_offsets::visualReloadProgress_offset != 0;
+    inline const bool invulnerable_offset_available = unit_offsets::invulnerable_offset != 0;
+    inline const bool invul_timer_offset_available = unit_offsets::invulTimer_offset != 0;
+    inline const bool air_velocity_offsets_available = unit_offsets::airmovement_offset != 0 && unit_offsets::airmovement_offsets::velocity_offset != 0;
+    inline const bool air_acceleration_offset_available = air_velocity_offsets_available && unit_offsets::airmovement_offsets::acceleration_offset != 0;
 
     struct runtime_offset_entry
     {
@@ -454,6 +470,13 @@ namespace offsets
             runtime_offset_entry{"g_RocketListIndexPtr", &offsets::Global::g_RocketListIndexPtr},
             runtime_offset_entry{"g_BombListIndexPtr", &offsets::Global::g_BombListIndexPtr},
             runtime_offset_entry{"g_EntityManager", &offsets::Global::g_EntityManager},
+            runtime_offset_entry{"projectile_offsets.missile_name_type", &offsets::projectile_offsets::missile_name_type},
+            runtime_offset_entry{"projectile_offsets.missile_name_container", &offsets::projectile_offsets::missile_name_container},
+            runtime_offset_entry{"projectile_offsets.bomb_name_container", &offsets::projectile_offsets::bomb_name_container},
+            runtime_offset_entry{"projectile_offsets.bomb_name_text", &offsets::projectile_offsets::bomb_name_text},
+            runtime_offset_entry{"projectile_offsets.position", &offsets::projectile_offsets::position},
+            runtime_offset_entry{"projectile_offsets.velocity", &offsets::projectile_offsets::velocity},
+            runtime_offset_entry{"projectile_offsets.owner", &offsets::projectile_offsets::owner},
             runtime_offset_entry{"alllistdata_offset", &offsets::alllistdata_offset},
             runtime_offset_entry{"bomb_index", &offsets::bomb_index},
             runtime_offset_entry{"cgame_offset", &offsets::cgame_offset},
@@ -495,6 +518,11 @@ namespace offsets
             runtime_offset_entry{"reload_offset6", &offsets::reload_offset6},
             runtime_offset_entry{"reload_offset7", &offsets::reload_offset7},
             runtime_offset_entry{"ui_pos_arr_offset", &offsets::ui_pos_arr_offset},
+            runtime_offset_entry{"base_game_version_str", &offsets::base_game_version_str},
+            runtime_offset_entry{"clock_obj", &offsets::clock_obj},
+            runtime_offset_entry{"game_difficulty", &offsets::game_difficulty},
+            runtime_offset_entry{"is_in_hangar_offset", &offsets::is_in_hangar_offset},
+            runtime_offset_entry{"function_rayhit_normalized", &offsets::function_rayhit_normalized},
             runtime_offset_entry{"function_das_get_usefull_total_time", &offsets::function_das_get_usefull_total_time},
 
             // [2] CGAME
@@ -526,6 +554,7 @@ namespace offsets
             // [3] LOCALPLAYER
             runtime_offset_entry{"localplayer.guiState_offset", &offsets::localplayer::guiState_offset},
             runtime_offset_entry{"localplayer.localunit_offset", &offsets::localplayer::localunit_offset},
+            runtime_offset_entry{"localplayer.ownedUnitRef_offset", &offsets::localplayer::ownedUnitRef_offset},
             runtime_offset_entry{"localplayer.controlledUnitRef_offset", &offsets::localplayer::controlledUnitRef_offset},
             runtime_offset_entry{"localplayer.spectatedModel_offset", &offsets::localplayer::spectatedModel_offset},
             runtime_offset_entry{"localplayer.botName_offset", &offsets::localplayer::botName_offset},
@@ -563,6 +592,10 @@ namespace offsets
             runtime_offset_entry{"unit_offsets.unitFlags2_offset", &offsets::unit_offsets::unitFlags2_offset},
             runtime_offset_entry{"unit_offsets.unitFlags3_offset", &offsets::unit_offsets::unitFlags3_offset},
             runtime_offset_entry{"unit_offsets.unitFlags4_offset", &offsets::unit_offsets::unitFlags4_offset},
+            runtime_offset_entry{"unit_offsets.ground_velocity_offset", &offsets::unit_offsets::ground_velocity_offset},
+            runtime_offset_entry{"unit_offsets.groundmovement_velocity_offset", &offsets::unit_offsets::groundmovement_velocity_offset},
+            runtime_offset_entry{"unit_offsets.airmovement_offsets.velocity_offset", &offsets::unit_offsets::airmovement_offsets::velocity_offset},
+            runtime_offset_entry{"unit_offsets.airmovement_offsets.acceleration_offset", &offsets::unit_offsets::airmovement_offsets::acceleration_offset},
 
             // [5] UNIT_INFO
             runtime_offset_entry{"unit_info_offsets.have_ccip_for_bombs", &offsets::unit_info_offsets::have_ccip_for_bombs},
@@ -651,39 +684,6 @@ namespace offsets
     // ========================================================================
     // [SECCIÓN 12] HELPERS
     // ========================================================================
-    inline auto trim(std::string value) -> std::string
-    {
-        const auto first = value.find_first_not_of(" \t\r\n");
-        if (first == std::string::npos)
-            return {};
-
-        const auto last = value.find_last_not_of(" \t\r\n");
-        return value.substr(first, last - first + 1);
-    }
-
-    inline auto get_offsets_file_path() -> std::filesystem::path
-    {
-        char module_path[MAX_PATH]{};
-        const DWORD path_len = GetModuleFileNameA(nullptr, module_path, MAX_PATH);
-        if (path_len == 0)
-            return std::filesystem::path("offsets.txt");
-
-        std::filesystem::path exe_path(module_path);
-        return exe_path.parent_path() / "offsets.txt";
-    }
-
-    inline auto apply_loaded_offset(const std::string& key, uintptr_t value) -> void
-    {
-        for (const auto& entry : runtime_offsets_registry())
-        {
-            if (key == entry.key)
-            {
-                *entry.value = value;
-                return;
-            }
-        }
-    }
-
     inline auto restore_default_offsets() -> void
     {
         const auto& defaults = []() -> const std::unordered_map<std::string, uintptr_t>&
@@ -707,100 +707,5 @@ namespace offsets
         }
     }
 
-    inline auto save_external_offsets() -> bool
-    {
-        std::ofstream out(get_offsets_file_path(), std::ios::trunc);
-        if (!out.is_open())
-            return false;
 
-        out << std::hex << std::showbase;
-        for (const auto& entry : runtime_offsets_registry())
-            out << entry.key << '=' << *entry.value << '\n';
-        return true;
-    }
-
-    inline auto load_external_offsets() -> void
-    {
-        std::ifstream in(get_offsets_file_path());
-        if (!in.is_open())
-        {
-            save_external_offsets();
-            return;
-        }
-
-        std::string line;
-        while (std::getline(in, line))
-        {
-            if (line.empty())
-                continue;
-
-            const auto pos = line.find('=');
-            if (pos == std::string::npos || pos == 0 || pos + 1 >= line.size())
-                continue;
-
-            const std::string key = trim(line.substr(0, pos));
-            const std::string value_str = trim(line.substr(pos + 1));
-            if (key.empty() || value_str.empty())
-                continue;
-
-            try
-            {
-                const uintptr_t value = static_cast<uintptr_t>(std::stoull(value_str, nullptr, 0));
-                apply_loaded_offset(key, value);
-            }
-            catch (...)
-            {
-                continue;
-            }
-        }
-    }
-
-    inline auto initialize_external_offsets() -> void
-    {
-        restore_default_offsets();
-
-        if (use_external_offsets_file)
-            load_external_offsets();
-    }
-
-    inline auto is_external_offsets_enabled() -> bool
-    {
-        return use_external_offsets_file;
-    }
-
-    inline auto set_external_offsets_enabled(bool enabled) -> void
-    {
-        if (use_external_offsets_file == enabled)
-            return;
-
-        use_external_offsets_file = enabled;
-        if (use_external_offsets_file)
-            load_external_offsets();
-        else
-            restore_default_offsets();
-    }
-
-    inline auto set_runtime_offset(const std::string& key, uintptr_t value) -> void
-    {
-        uintptr_t* target = nullptr;
-        for (const auto& entry : runtime_offsets_registry())
-        {
-            if (key == entry.key)
-            {
-                target = entry.value;
-                break;
-            }
-        }
-
-        if (!target)
-            return;
-
-        if (*target != value)
-            *target = value;
-    }
-
-    inline auto create_or_update_external_offsets_file() -> bool
-    {
-        return save_external_offsets();
-    }
 }

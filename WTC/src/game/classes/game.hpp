@@ -7,6 +7,9 @@ public:
 		this->base_address = TargetProcess->Read< uintptr_t >(runtime::base_address() + offsets::cgame_offset);
 		return this->base_address != 0;
 	}
+	auto init_from_validated_base(uintptr_t address) -> bool {
+		this->base_address=address;return address!=0;
+	}
 
 	auto get_base() -> uintptr_t {
 		return this->base_address;

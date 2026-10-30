@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "..\..\lib\dma\vmmdll.h"
 #include "..\..\lib\dma\leechcore.h"
 #pragma comment(lib, "leechcore.lib")
@@ -26,6 +28,13 @@ private:
 		std::string process_name = "";
 	};
 	std::unordered_map<std::wstring, ULONG64> Modules;
+	mutable std::atomic<uint64_t> optional_read_failures{ 0 };
+	mutable std::atomic<uintptr_t> last_optional_failure{ 0 };
+	void NoteOptionalReadFailure(uintptr_t address) const
+	{
+		last_optional_failure.store(address, std::memory_order_relaxed);
+		optional_read_failures.fetch_add(1, std::memory_order_relaxed);
+	}
 	static inline CurrentProcessInformation current_process{ };
 
 	static inline BOOLEAN DMA_INITIALIZED = FALSE;
@@ -161,16 +170,6 @@ public:
 	/*This part is where all memory operations are done, such as read, write.*/
 
 	/**
-	 * \brief Scans the process for the signature.
-	 * \param signature the signature example "48 ? ? ?"
-	 * \param range_start Region to start scan from
-	 * \param range_end Region up to where it should scan
-	 * \param PID (OPTIONAL) where to read to?
-	 * \return address of signature
-	 */
-	uint64_t FindSignature(const char* signature, uint64_t range_start, uint64_t range_end, int PID = 0);
-
-	/**
 	 * \brief Writes memory to the process
 	 * \param address The address to write to
 	 * \param buffer The buffer to writeze of the buffer
@@ -205,6 +204,11 @@ public:
 	* @return true if successful, false if not.
 	*/
 	bool Read(uintptr_t address, void* buffer, size_t size) const;
+	// Optional names/types may disappear between snapshot and read. Keep the
+	// failure observable without treating it as a critical DMA read error.
+	bool ReadOptional(uintptr_t address, void* buffer, size_t size) const;
+	uint64_t OptionalReadFailures() const { return optional_read_failures.load(std::memory_order_relaxed); }
+	uintptr_t LastOptionalFailure() const { return last_optional_failure.load(std::memory_order_relaxed); }
 	bool Read(uintptr_t address, void* buffer, size_t size, int pid) const;
 
 	/**
@@ -228,14 +232,24 @@ public:
 
 	std::string ReadString( uint64_t address, size_t size = 256 )
 	{
-		if ( !address || size > 4096 )
-			return "";
+		if (!address || size == 0 || size > 4096)
+			return {};
 
-		char string[ 4096 ] = { 0 };
-		if ( !Read( address, string, size ) )
-			return "";
+		// A pair of small 32-bit fields (e.g. 0x5d0000001f) is not a
+		// plausible name pointer. Do not send it to the DMA device.
+		if ((address & 0xffffffffULL) < 0x10000ULL && (address >> 32) < 0x1000ULL)
+		{
+			NoteOptionalReadFailure(static_cast<uintptr_t>(address));
+			return {};
+		}
 
-		return std::string( string );
+		char string[4096] = {};
+		if (!ReadOptional(static_cast<uintptr_t>(address), string, size))
+			return {};
+
+		size_t length = 0;
+		while (length < size && string[length] != '\0') ++length;
+		return std::string(string, length);
 	}
 
 	/**
@@ -279,7 +293,7 @@ public:
 	 * \param buffer the buffer to read/write to
 	 * \param size the size of buffer
 	 */
-	bool AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size);
+	bool AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size, DWORD* bytes_read = nullptr);
 	bool AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size);
 	template <typename T>
 	bool AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addr, T value) const
@@ -301,7 +315,7 @@ public:
 	bool ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle, bool bClear);
 
 	/*the FPGA handle*/
-	VMM_HANDLE vHandle;
+	VMM_HANDLE vHandle = nullptr;
 };
 
 inline const std::unique_ptr< c_memory > TargetProcess{ new c_memory( ) };

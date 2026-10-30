@@ -58,6 +58,8 @@ void c_memory::Disconnect()
 	PROCESS_INITIALIZED = FALSE;
 	this->current_process = {};
 	this->Modules.clear();
+	optional_read_failures.store(0, std::memory_order_relaxed);
+	last_optional_failure.store(0, std::memory_order_relaxed);
 }
 
 bool c_memory::DumpMemoryMap(bool debug)
@@ -663,65 +665,6 @@ bool c_memory::DumpMemory(uintptr_t address, std::string path)
 	return true;
 }
 
-static const char* hexdigits =
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\001\002\003\004\005\006\007\010\011\000\000\000\000\000\000"
-"\000\012\013\014\015\016\017\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\012\013\014\015\016\017\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
-"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000";
-
-static uint8_t GetByte(const char* hex)
-{
-	return (uint8_t)((hexdigits[hex[0]] << 4) | (hexdigits[hex[1]]));
-}
-
-uint64_t c_memory::FindSignature(const char* signature, uint64_t range_start, uint64_t range_end, int PID)
-{
-	if (!signature || signature[0] == '\0' || range_start >= range_end)
-		return 0;
-
-	if (PID == 0)
-		PID = this->current_process.PID;
-
-	std::vector<uint8_t> buffer(range_end - range_start);
-	if (!VMMDLL_MemReadEx(this->vHandle, PID, range_start, buffer.data(), buffer.size(), 0, VMMDLL_FLAG_NOCACHE))
-		return 0;
-
-	const char* pat = signature;
-	uint64_t first_match = 0;
-	for (uint64_t i = range_start; i < range_end; i++)
-	{
-		if (*pat == '?' || buffer[i - range_start] == GetByte(pat))
-		{
-			if (!first_match)
-				first_match = i;
-
-			if (!pat[2])
-				break;
-
-			pat += (*pat == '?') ? 2 : 3;
-		}
-		else
-		{
-			pat = signature;
-			first_match = 0;
-		}
-	}
-
-	return first_match;
-}
-
 bool c_memory::Write(uintptr_t address, void* buffer, size_t size) const
 {
 	if ( !is_valid_user_address( address ) || !buffer || size == 0 )
@@ -764,6 +707,28 @@ bool c_memory::Read(uintptr_t address, void* buffer, size_t size) const
 	{
 		if (should_log_transient_failure())
 			LOG("[!] Failed to read Memory at 0x%zx\n", address);
+		return false;
+	}
+	return true;
+}
+
+bool c_memory::ReadOptional(uintptr_t address, void* buffer, size_t size) const
+{
+	constexpr uintptr_t user_limit = 0x7FFFFFFFFFFF;
+	if (address < 0x10000 || address >= user_limit ||
+		!buffer || size == 0 || size > MAXDWORD || size > user_limit - address ||
+		!this->vHandle || this->current_process.PID <= 0)
+	{
+		NoteOptionalReadFailure(address);
+		return false;
+	}
+
+	DWORD bytes_read = 0;
+	if (!VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
+		static_cast<PBYTE>(buffer), static_cast<DWORD>(size), &bytes_read, VMMDLL_FLAG_NOCACHE) ||
+		bytes_read != size)
+	{
+		NoteOptionalReadFailure(address);
 		return false;
 	}
 	return true;
@@ -818,12 +783,12 @@ bool c_memory::ClearScatterHandle(VMMDLL_SCATTER_HANDLE handle)
 	return true;
 }
 
-bool c_memory::AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)
+bool c_memory::AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size, DWORD* bytes_read)
 {
 	if (!handle || !is_valid_user_address(static_cast<uintptr_t>(address)) || !buffer || size == 0 || size > static_cast<size_t>(MAXDWORD))
 		return false;
 
-	return VMMDLL_Scatter_PrepareEx(handle, address, static_cast<DWORD>(size), static_cast<PBYTE>(buffer), nullptr) != 0;
+	return VMMDLL_Scatter_PrepareEx(handle, address, static_cast<DWORD>(size), static_cast<PBYTE>(buffer), bytes_read) != 0;
 }
 
 bool c_memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)

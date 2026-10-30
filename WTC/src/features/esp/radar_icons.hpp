@@ -6,12 +6,12 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include "radar_symbols.hpp"
 
 // Símbolos tácticos vectoriales: no dependen de la fuente/atlas del proceso remoto.
 // El proceso DMA nunca entrega punteros útiles al ImGui del overlay.
 namespace esp::radar::icons
 {
-    enum class kind : uint8_t { aircraft, unknown, light, medium, heavy, tank_destroyer, spaa };
     struct entry_t
     {
         kind symbol = kind::unknown;
@@ -27,51 +27,16 @@ namespace esp::radar::icons
 
     inline std::string read_hint(uintptr_t address)
     {
-        if (!safe_pointer(address) || address > static_cast<uintptr_t>(0x0000800000000000ull - 97))
+        if (!safe_pointer(address) || address > static_cast<uintptr_t>(0x0000800000000000ull - 64))
             return {};
-        char buf[96]{};
-        if (!TargetProcess->Read(address, buf, sizeof(buf)))
-            return {};
-        buf[95] = '\0';
-        const size_t end = std::char_traits<char>::length(buf);
-        if (end == 95) return {}; // no confiar en strings truncados/no terminados
-        return std::string(buf, end);
-    }
-
-    inline std::string canonical(std::string_view raw)
-    {
-        std::string out;
-        out.reserve(raw.size());
-        for (unsigned char c : raw)
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
-                out.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : static_cast<char>(c));
-        return out;
-    }
-
-    inline bool has(std::string_view text, std::string_view token)
-    {
-        return text.find(token) != std::string_view::npos;
-    }
-
-    inline kind classify(std::string_view subtype, std::string_view coarse)
-    {
-        const std::string type = canonical(coarse);
-        if (has(type, "fighter") || has(type, "bomber") || has(type, "assault") ||
-            has(type, "helicopter") || has(type, "drone")) return kind::aircraft;
-        const std::string sub = canonical(subtype);
-        // El subtipo tiene prioridad: exp_tank es solo la familia genérica.
-        if (has(sub, "spaa") || has(sub, "antiair") || has(sub, "antiaereo") || has(sub, "flak") || has(sub, "aaa") || sub == "aa" || has(sub, "zsu") || has(sub, "\xD0\x97\xD0\xA1\xD0\xA3") || has(subtype, "antiaéreo") || has(subtype, "Antiaéreo") || has(subtype, "antiaérea")) return kind::spaa;
-        if (has(sub, "tankdestroyer") || has(sub, "cazacarros") || has(sub, "cazatanques") || has(sub, "panzerjager") || has(sub, "td")) return kind::tank_destroyer;
-        if (has(sub, "heavy") || has(sub, "pesado")) return kind::heavy;
-        if (has(sub, "medium") || has(sub, "medio")) return kind::medium;
-        if (has(sub, "light") || has(sub, "ligero")) return kind::light;
-        if (has(type, "spaa") || has(type, "antiair") || type == "expaaa") return kind::spaa;
-        if (has(type, "tankdestroyer")) return kind::tank_destroyer;
-        if (has(type, "heavytank")) return kind::heavy;
-        if (has(type, "mediumtank")) return kind::medium;
-        if (has(type, "lighttank")) return kind::light;
-        if (has(type, "tank")) return kind::medium;
-        return kind::unknown;
+        char buf[64]{};
+        // Los nombres conocidos caben en 32 bytes; solo ampliar si hace falta.
+        // Optional evita falsos errores DMA al desaparecer una unidad.
+        if(!TargetProcess->ReadOptional(address,buf,32))return {};
+        for(size_t i=0;i<32;++i)if(buf[i]=='\0')return std::string(buf,i);
+        if(!TargetProcess->ReadOptional(address+32,buf+32,32))return {};
+        for(size_t i=32;i<64;++i)if(buf[i]=='\0')return std::string(buf,i);
+        return {}; // no confiar en nombres sin terminador
     }
 
     inline kind classify_unit(uintptr_t unit_base, uintptr_t image)
@@ -109,10 +74,57 @@ namespace esp::radar::icons
     {
         constexpr ImU32 shadow = IM_COL32(10, 10, 10, 240);
         constexpr float r = 5.5f;
-        if (symbol == kind::aircraft || symbol == kind::unknown)
-        {
-            list->AddCircleFilled(p, 4.5f, shadow, 12);
-            list->AddCircleFilled(p, 3.5f, color, 12);
+        auto at=[&](float dx,float dy){return ImVec2(p.x+dx,p.y+dy);};
+        auto stroke=[&](float ax,float ay,float bx,float by,float thickness=1.6f){
+            list->AddLine(at(ax,ay),at(bx,by),shadow,thickness+2.0f);
+            list->AddLine(at(ax,ay),at(bx,by),color,thickness);
+        };
+        if(symbol==kind::fighter) {
+            // Sharp delta wing / single fuselage.
+            list->AddTriangleFilled(at(0,-8),at(-7,5),at(7,5),shadow);
+            list->AddTriangleFilled(at(0,-6),at(-5,4),at(5,4),color);
+            stroke(0,-7,0,7,1.7f);
+            stroke(-2,5,2,5,1.2f);
+            return;
+        }
+        if(symbol==kind::strike) {
+            // Swept wings and prominent angled attack arrow.
+            stroke(0,-8,0,8,2.3f);
+            stroke(0,-2,-8,5,2.6f);stroke(0,-2,8,5,2.6f);
+            stroke(0,5,-3,8,1.3f);stroke(0,5,3,8,1.3f);
+            return;
+        }
+        if(symbol==kind::bomber) {
+            // Broad straight wing, two visible engine pods.
+            stroke(0,-8,0,8,3.0f);
+            stroke(-9,-1,9,-1,3.1f);
+            stroke(-4,-2,-4,3,2.2f);stroke(4,-2,4,3,2.2f);
+            stroke(-4,6,4,6,1.7f);
+            return;
+        }
+        if(symbol==kind::helicopter) {
+            // Main rotor, angular cabin and rear rotor.
+            stroke(-9,-5,9,-5,2.0f);
+            stroke(0,-5,0,-2,1.5f);
+            list->AddTriangleFilled(at(0,-2),at(-4,3),at(4,3),shadow);
+            list->AddTriangleFilled(at(0,-1),at(-3,2),at(3,2),color);
+            stroke(0,3,0,8,1.7f);stroke(-3,7,3,7,1.4f);
+            return;
+        }
+        if(symbol==kind::unknown) {
+            list->AddCircleFilled(p,4.5f,shadow,12);
+            list->AddCircleFilled(p,3.5f,color,12);
+            return;
+        }
+        if(symbol==kind::naval) {
+            stroke(-8,2,8,2,2.2f); stroke(-6,2,-3,6); stroke(-3,6,5,6); stroke(5,6,8,2);
+            stroke(-2,2,-2,-3); stroke(-2,-3,4,-3); stroke(4,-3,4,2);
+            return;
+        }
+        if(symbol==kind::structure) {
+            list->AddRectFilled(at(-6,-5),at(6,6),shadow);
+            list->AddRect(at(-5,-4),at(5,5),color,0.0f,0,2.0f);
+            stroke(-6,-5,0,-9); stroke(0,-9,6,-5);
             return;
         }
         // Halo oscuro y siluetas inequívocas también a escala pequeña.

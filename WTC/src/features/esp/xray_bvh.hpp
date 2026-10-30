@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include "xray_parts.hpp"
+#include "xray_boxes.hpp"
+#include "../../core/adjacent_pointer_fields.hpp"
 
 namespace xray
 {
@@ -70,6 +72,7 @@ namespace xray
         std::string            name;
         xray_part_kind_t       kind = xray_part_kind_t::Body; // clasificación cacheada al decodificar
         std::vector<vec3_t>    vertices;         // decodificados en espacio local del part
+        boxes::bounds3         local_bounds{};   // caja calculada UNA vez por decodificación
         std::vector<uint32_t>  indices;          // triples: [i0,i1,i2, i3,i4,i5, ...]
         uint16_t               transform_index = 0;      // bind pose index (m_TransformIndex)
         uint16_t               tree_index = 0xFFFF; // animated skeleton index (m_TreeIndex)
@@ -265,6 +268,7 @@ namespace xray
 
         // --- nombre ---
         out.name.clear(); // decode_part también puede llamarse con un XrayPart reutilizado.
+        out.local_bounds = {};
         out.kind = xray_part_kind_t::Body;
         if (name_pool_base != 0 && name_offset != 0 && name_offset < name_pool_size)
         {
@@ -388,6 +392,9 @@ namespace xray
             }
             out.indices.resize(write_index);
         }
+        // Sólo Ammo necesita una caja: no cargar este trabajo al resto.
+        if(boxes::compact(out.kind))
+            out.local_bounds=boxes::from_indexed_vertices(out.vertices,out.indices);
 
         return true;
     }
@@ -416,13 +423,17 @@ namespace xray
             ? TargetProcess->Read<uintptr_t>(dm_root_new + offsets::damage_model::m_ModelContainer)
             : 0;
 
-        const uintptr_t header_new = dm_mid_new
-            ? TargetProcess->Read<uintptr_t>(dm_mid_new + offsets::damage_model::m_PackedHeader)
-            : 0;
-
-        const uintptr_t matrix_array_new = dm_mid_new
-            ? TargetProcess->Read<uintptr_t>(dm_mid_new + offsets::damage_model::m_TransformArray)
-            : 0;
+        uintptr_t header_new=0,matrix_array_new=0;
+        if (dm_mid_new && !adjacent_pointer_fields::read_pair(
+            dm_mid_new,offsets::damage_model::m_PackedHeader,
+            offsets::damage_model::m_TransformArray,header_new,matrix_array_new,
+            [](uintptr_t address,void* dest,size_t bytes) {
+                return TargetProcess->ReadOptional(address,dest,bytes);
+            })) {
+            // Offsets distantes o lectura parcial: conservar recuperación campo a campo.
+            header_new=TargetProcess->Read<uintptr_t>(dm_mid_new+offsets::damage_model::m_PackedHeader);
+            matrix_array_new=TargetProcess->Read<uintptr_t>(dm_mid_new+offsets::damage_model::m_TransformArray);
+        }
 
         const bool chain_changed =
             dm_root_new != entry.dm_root ||

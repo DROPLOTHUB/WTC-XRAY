@@ -15,9 +15,9 @@ static_assert(sizeof(std::uintptr_t) == 8);
 struct Vec3 { float x{}, y{}, z{}; };
 static_assert(sizeof(Vec3) == 12);
 struct Layout {
-    std::uintptr_t manager_rva = 0x7E67768;
-    std::uintptr_t rocket_selector_rva = 0x7A02490;
-    std::uintptr_t bomb_selector_rva = 0x7A00F50;
+    std::uintptr_t manager_rva = 0x7E89BE8;
+    std::uintptr_t rocket_selector_rva = 0x7A24860;
+    std::uintptr_t bomb_selector_rva = 0x7A23320;
     std::uintptr_t data_offset = 0x178;
     std::uintptr_t index_offset = 0x570;
     std::uintptr_t position_offset = 0x2C0;
@@ -25,12 +25,15 @@ struct Layout {
     std::uintptr_t owner_offset = 0x58;
     std::uintptr_t missile_name_offset = 0x720;
     std::uintptr_t bomb_name_offset = 0x718;
-    std::uintptr_t missile_name_offset_alt = 0;   // esquema del usuario: 0x6E8
+    std::uintptr_t missile_name_offset_alt = 0;   // fallback opt-in, not used by current offsets
     std::uintptr_t bomb_name_offset_alt = 0;
-    std::uintptr_t missile_name_text_offset = 0x50;
+    std::uintptr_t missile_name_text_offset = 0x870;
+    std::uintptr_t missile_name_text_offset_alt = 0x50; // only if the supplied field fails
     std::uintptr_t bomb_name_text_offset = 0x10;
     std::uintptr_t max_reads = 4096;
-    bool aam_only = false;   // dibujar solo misiles aire-aire
+    bool aam_only = false;   // valor por defecto para nombres nuevos
+    bool (*name_allowed)(const char*, void*) = nullptr;
+    void* name_context = nullptr;
 };
 struct Candidate {
     std::uintptr_t source_id{}, owner{};
@@ -48,14 +51,17 @@ struct Diagnostics {
     std::uint16_t subcount{};
     std::uint16_t offset0{}, offset1{};
     std::uintptr_t name_container{}, name_text{};
+    std::uintptr_t name_probe_source{}, name_probe_container{}, name_probe_text{};
+    std::uint32_t name_probes{}, name_probe_stage{}; // 2=container read, 3=pointer, 5=text read, 6=pointer, 7=string read, 8=empty, 9=valid
     char raw_name[64]{};
     std::uint32_t names_read{};
-    std::uintptr_t name_offset{};
+    std::uintptr_t name_offset{}, name_text_offset{};
     std::array<std::uint8_t, 32> header{};
     std::array<std::uint8_t, 32> descriptor{};
-    std::uint32_t selector{}, sublist_count{}, sublists_visited{}, rows_seen{};
+    std::uint32_t raw_selector{}, selector{}, sublist_count{}, sublists_visited{}, rows_seen{};
     std::uint32_t active_rows{}, accepted{}, rejected{}, read_calls{}, truncated{};
     std::uint32_t flares{};
+    std::uint32_t caliber_ignored{};
     std::uint32_t not_aam{};
     char not_aam_name[64]{};
 };
@@ -80,6 +86,19 @@ inline bool name_has_flare(const char* name)
     return false;
 }
 
+// El ECS "rocket" tambien contiene proyectiles de canones como 100mm_...
+// Por peticion del usuario: cualquier "mm" (sin distinguir mayusculas)
+// no se registra ni se dibuja, aunque estuviera activado manualmente.
+inline bool name_has_mm(const char* name) {
+    if (!name) return false;
+    for (const char* p=name; *p; ++p) {
+        const auto lower=[](char c) { return c>='A' && c<='Z'
+            ? static_cast<char>(c+('a'-'A')) : c; };
+        if (lower(p[0])=='m' && lower(p[1])=='m') return true;
+    }
+    return false;
+}
+
 // Solo misiles aire-aire. La lista es por familia de arma (designador o nombre
 // comercial) tal y como aparece en el nombre del proyectil. Todo lo que no
 // coincida se descarta: aire-tierra (agm/kh), antiradiacion (harm), bombas,
@@ -92,10 +111,14 @@ inline bool name_is_air_to_air(const char* name)
     std::size_t length = 0;
     for (; name[length] != '\0' && length + 1 < sizeof(lower); ++length) {
         const char c = name[length];
-        lower[length] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+        lower[length] = c == '-' ? '_' :
+            ((c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c);
     }
     lower[length] = '\0';
     const std::string_view view(lower, length);
+    // El prefijo antes de ^ identifica al avion; el sufijo completo identifica
+    // el arma observada en el log. Evitar aceptar otros nombres parecidos.
+    if (view.ends_with("^sws_flz_lwf_63.blk")) return true;
     static constexpr std::string_view tokens[] = {
         // Designadores (con y sin guion bajo)
         "aim9", "aim_9", "aim7", "aim_7", "aim120", "aim_120", "aim54", "aim_54", "aim132", "aim174",
@@ -138,7 +161,7 @@ inline bool valid_pointer(std::uintptr_t value) {
 inline constexpr std::size_t max_candidates = 499;
 inline constexpr std::size_t max_names = 64;
 inline constexpr std::size_t record_size = 0x38;
-inline constexpr std::uint32_t max_selector = 0xFFFFF;
+inline constexpr std::uint32_t max_selector = 0xFFFFFF; // 24 bits: el ECS usa IDs dispersos, no indices de centenas
 
 inline void clean_name(const char* raw, std::size_t raw_size, char* out, std::size_t out_size)
 {
@@ -253,19 +276,15 @@ inline void read_query(Read&& reader, std::uintptr_t base, const Layout& layout,
         !add(diagnostic.manager, layout.data_offset, data_address) ||
         !add(diagnostic.manager, layout.index_offset, index_address) ||
         !access(selector_address, &raw_selector, sizeof(raw_selector))) return;
-    diagnostic.selector = raw_selector & 0xFFFFFFu;
+    diagnostic.raw_selector = raw_selector;
+    diagnostic.selector = raw_selector & max_selector;
     if (raw_selector == UINT32_MAX) {
         fail(Failure::selector);
         return;
     }
-    // Un selector real es un indice de tabla (cientos). Un valor enorme significa
-    // que la RVA configurada apunta a otra parte del modulo: conviene fallar aqui
-    // (stage=selector) en lugar de leer un record fuera de la tabla y no dibujar
-    // nada sin explicacion.
-    if (diagnostic.selector > max_selector) {
-        fail(Failure::selector);
-        return;
-    }
+    // El selector observado 0x8F7A75 excede 20 bits pero pertenece al campo
+    // enmascarado de 24 bits. No suponer indices densos: comprobar SIEMPRE
+    // punteros/lecturas del record y validar su descriptor antes de emitir algo.
     if (!access(data_address, &data, sizeof(data)) ||
         !access(index_address, &index, sizeof(index)) ||
         !range(data, 0) || !range(index, 0) ||
@@ -383,27 +402,42 @@ inline void read_query(Read&& reader, std::uintptr_t base, const Layout& layout,
             char raw_name[64]{};
             bool have_name = false;
             if (diagnostic.names_read < max_names &&
-                diagnostic.read_calls + 8 <= layout.max_reads) {
+                diagnostic.read_calls + 12 <= layout.max_reads) {
                 const std::uintptr_t text_offset = is_bomb ? layout.bomb_name_text_offset : layout.missile_name_text_offset;
-                const auto try_name = [&](std::uintptr_t container_offset) -> bool {
-                    if (container_offset == 0 || container_offset > limit - source)
-                        return false;
-                    const std::uintptr_t container_address = source + container_offset;
+                const std::uintptr_t container_offset = is_bomb ? layout.bomb_name_offset : layout.missile_name_offset;
+                const auto try_name = [&](std::uintptr_t container_at, std::uintptr_t text_at) -> bool {
+                    if (!container_at) return false;
+                    ++diagnostic.name_probes;
+                    const bool first = diagnostic.name_probe_source == 0;
+                    if (first) diagnostic.name_probe_source = source;
+                    const auto probe_stage = [&](std::uint32_t stage) {
+                        if (diagnostic.name_probe_source == source) diagnostic.name_probe_stage = stage;
+                    };
+                    if (container_at > limit - source) { probe_stage(1); return false; }
                     std::uint64_t container{};
-                    if (!soft_access(container_address, &container, sizeof(container)) ||
-                        !valid_pointer(container) || text_offset > limit - container)
-                        return false;
-                    const std::uintptr_t text_address = container + text_offset;
+                    if (!soft_access(source + container_at, &container, sizeof(container))) {
+                        probe_stage(2); return false;
+                    }
+                    if (first && diagnostic.name_probe_container == 0) diagnostic.name_probe_container = container;
+                    if (!valid_pointer(container)) { probe_stage(3); return false; }
+                    if (text_at > limit - container) { probe_stage(4); return false; }
                     std::uint64_t text{};
-                    if (!soft_access(text_address, &text, sizeof(text)) ||
-                        !valid_pointer(text) || 63 > limit - text)
-                        return false;
-                    if (!soft_access(text, raw_name, 63))
-                        return false;
+                    if (!soft_access(container + text_at, &text, sizeof(text))) {
+                        probe_stage(5); return false;
+                    }
+                    if (diagnostic.name_probe_source == source && diagnostic.name_probe_text == 0)
+                        diagnostic.name_probe_text = text;
+                    if (!valid_pointer(text) || 63 > limit - text) { probe_stage(6); return false; }
+                    std::memset(raw_name, 0, sizeof(raw_name));
+                    if (!soft_access(text, raw_name, 63)) { probe_stage(7); return false; }
+                    if (!raw_name[0]) { probe_stage(8); return false; }
+                    probe_stage(9);
                     have_name = true;
                     ++diagnostic.names_read;
-                    if (diagnostic.name_offset == 0)
-                        diagnostic.name_offset = container_offset;
+                    if (diagnostic.name_offset == 0) {
+                        diagnostic.name_offset = container_at;
+                        diagnostic.name_text_offset = text_at;
+                    }
                     if (diagnostic.name_container == 0) {
                         diagnostic.name_container = container;
                         diagnostic.name_text = text;
@@ -411,23 +445,35 @@ inline void read_query(Read&& reader, std::uintptr_t base, const Layout& layout,
                     }
                     return true;
                 };
-                // Offset principal y alternativo (esquema del usuario: +0x720 y +0x6E8).
-                if (!try_name(is_bomb ? layout.bomb_name_offset : layout.missile_name_offset))
-                    try_name(is_bomb ? layout.bomb_name_offset_alt : layout.missile_name_offset_alt);
+                // Prefer the supplied +0x720 -> +0x870 chain. Legacy +0x50 is
+                // attempted only on failed reads; unknown names stay rejected in AAM mode.
+                have_name = try_name(container_offset, text_offset);
+                if (!have_name && !is_bomb && layout.missile_name_text_offset_alt)
+                    have_name = try_name(container_offset, layout.missile_name_text_offset_alt);
+                const auto alternate = is_bomb ? layout.bomb_name_offset_alt : layout.missile_name_offset_alt;
+                if (!have_name && alternate) have_name = try_name(alternate, text_offset);
+                if (!have_name && alternate && !is_bomb && layout.missile_name_text_offset_alt)
+                    have_name = try_name(alternate, layout.missile_name_text_offset_alt);
                 if (diagnostic.failure == Failure::budget) { finish(); return; }
                 if (have_name && name_has_flare(raw_name)) {
                     ++diagnostic.flares;
                     continue;
                 }
-                if (layout.aam_only && have_name && !name_is_air_to_air(raw_name)) {
+                if (have_name && name_has_mm(raw_name)) {
+                    ++diagnostic.caliber_ignored;
+                    continue; // antes de callback, posicion, velocidad y trayectoria
+                }
+                if (have_name && !is_bomb &&
+                    !(layout.name_allowed ? layout.name_allowed(raw_name, layout.name_context)
+                        : (!layout.aam_only || name_is_air_to_air(raw_name)))) {
                     ++diagnostic.not_aam;
                     if (diagnostic.not_aam_name[0] == '\0')
                         std::memcpy(diagnostic.not_aam_name, raw_name, sizeof(diagnostic.not_aam_name));
                     continue;
                 }
             }
-            // Modo solo-aire-aire y sin nombre no se puede clasificar: no se dibuja.
-            if (layout.aam_only && !have_name) {
+            // Sin nombre no existe una casilla segura que permita identificarlo.
+            if (!have_name) {
                 ++diagnostic.not_aam;
                 continue;
             }
