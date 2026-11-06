@@ -1,1 +1,67 @@
 
+name: Build and Release C++
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Compile C++ Project
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Locate solution
+        id: solution
+        shell: pwsh
+        run: |
+          $solution = Get-ChildItem -Path . -Filter *.sln -Recurse |
+            Where-Object { $_.FullName -notmatch '\\(\.git|\.vs)\\' } |
+            Select-Object -First 1
+
+          if (!$solution) {
+            throw "No Visual Studio solution found."
+          }
+
+          "path=$($solution.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          msbuild "${{ steps.solution.outputs.path }}" /m /p:Configuration=Release /p:Platform=x64
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build failed."
+          }
+
+      - name: Collect EXE and DLL files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+
+          Get-ChildItem -Path . -Include *.exe,*.dll -File -Recurse |
+            Where-Object {
+              $_.FullName -notmatch '\\(\.git|\.vs|dist|Debug|obj)\\'
+            } |
+            ForEach-Object {
+              Copy-Item $_.FullName dist/
+            }
+
+          if (!(Get-ChildItem dist -File)) {
+            throw "No compiled files found."
+          }
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
