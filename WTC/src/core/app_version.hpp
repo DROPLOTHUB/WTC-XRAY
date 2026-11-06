@@ -4,7 +4,7 @@
 
 // Actualizar solo este nombre al publicar una entrega nueva.
 namespace app_version {
-    inline constexpr char release_name[]="v5.25 Full Language Public";
+    inline constexpr char release_name[]="v5.26 Full Language Public";
     inline const char* sidebar_label() {
         static const std::string label=[] {
             const std::string_view name(release_name);

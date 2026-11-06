@@ -333,6 +333,8 @@ inline const char* label(const char* source) {
         {"Fallback historico API: comprobar que la municion activa sea del canon A2A.","Historical API fallback: verify active ammunition belongs to the A2A cannon."},
         {"Diagnostico municion A2A (sin claves ni punteros)","A2A ammunition diagnostics (no keys or pointers)"},
         {"Copiar diagnostico de todas las armas","Copy diagnostics for all weapons"},
+        {"Copiar diagnostico X-Ray","Copy X-Ray diagnostics"},
+        {"Ambar: pose estatica de respaldo; la animacion no se resolvio.","Amber: static fallback pose; animation could not be resolved."},
         {"Resultados por arma (indices desde 0)","Per-weapon results (zero-based indices)"},
         {"Usar esta arma","Use this weapon"},
         {"Los valores API validados no prueban que los campos internos del arma sigan vigentes.","Validated API values do not prove internal weapon fields are still current."},

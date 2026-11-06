@@ -826,6 +826,9 @@ TacticalColumnsEnd(); }
                             TacticalToggle("Module Names", &sdk::bShowModuleNames);
                             TacticalUI::TextDisabled("Modo: Wireframe (unico)");
                             TacticalUI::TextWrapped("Solo Ammo se simplifica a cajas de contorno; el resto conserva sus lineas originales.");
+                            TacticalUI::TextWrapped("Ambar: pose estatica de respaldo; la animacion no se resolvio.");
+                            if (TacticalUI::Button("Copiar diagnostico X-Ray"))
+                                ImGui::SetClipboardText(::xray::pose::diagnostic_report().c_str());
 
                             TacticalNextColumn(); TacticalSection("Módulos visibles");
                             TacticalToggle("Gun Barrel", &sdk::bShowModuleGunBarrel); 

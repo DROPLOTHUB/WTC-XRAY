@@ -28,6 +28,7 @@
 
 #include "game/classes/movement.hpp"
 #include "xray_bvh.hpp"
+#include "xray_pose.hpp"
 #include "esp_frame_policy.hpp"
 #include "../../core/render_work_policy.hpp"
 #include "../../core/adjacent_value_fields.hpp"
@@ -739,6 +740,7 @@ namespace esp
         float          f[16] = {};
         xform_layout_t layout = XF_RM3;
         bool           valid = false;
+        xray::pose::failure reason = xray::pose::failure::not_attempted;
     };
 
     struct xform_scheme_t
@@ -800,16 +802,14 @@ namespace esp
                 v.x * f[0] + v.y * f[1] + v.z * f[2] + f[3],
                 v.x * f[4] + v.y * f[5] + v.z * f[6] + f[7],
                 v.x * f[8] + v.y * f[9] + v.z * f[10] + f[11] };
-        case XF_CM:
-            return vec3_t{
-                v.x * f[0] + v.y * f[4] + v.z * f[8] + f[12],
-                v.x * f[1] + v.y * f[5] + v.z * f[9] + f[13],
-                v.x * f[2] + v.y * f[6] + v.z * f[10] + f[14] };
-        case XF_CM3:
-            return vec3_t{
-                v.x * f[0] + v.y * f[3] + v.z * f[6] + f[9],
-                v.x * f[1] + v.y * f[4] + v.z * f[7] + f[10],
-                v.x * f[2] + v.y * f[5] + v.z * f[8] + f[11] };
+        case XF_CM: {
+            const auto p = xray::pose::apply_cm<4>(f, {v.x, v.y, v.z});
+            return vec3_t{p.x, p.y, p.z};
+        }
+        case XF_CM3: {
+            const auto p = xray::pose::apply_cm<3>(f, {v.x, v.y, v.z});
+            return vec3_t{p.x, p.y, p.z};
+        }
         case XF_RM3:
         default:
             return vec3_t{
@@ -839,13 +839,14 @@ namespace esp
 
     inline bool read_part_transform(uintptr_t matrix_array_base, uint16_t transform_index, part_xform_t& out)
     {
-        out.valid = false;
-        if (!matrix_array_base) return false;
-        if (transform_index == 0xFFFFu || transform_index >= 4096u) return false;
-
-        const uintptr_t addr = matrix_array_base + static_cast<uintptr_t>(transform_index) * 0x30;
-        if (!TargetProcess->Read(addr, out.f, 12 * sizeof(float))) return false;
-
+        out = {};
+        const auto sample = xray::pose::read_bind(matrix_array_base, transform_index,
+            [](uintptr_t address, void* buffer, size_t size) {
+                return TargetProcess->ReadOptional(address, buffer, size);
+            });
+        out.reason = sample.reason;
+        if (!sample.valid) return false;
+        std::copy(sample.f.begin(), sample.f.end(), out.f);
         out.layout = XF_CM3;
         out.valid = true;
         return true;
@@ -854,57 +855,33 @@ namespace esp
     // ========================================================================
     // [SECCIÓN 7c] X-RAY — SKELETON TREE (animado)
     // ========================================================================
-    struct unit_skeleton_ctx_t
-    {
-        uintptr_t dm = 0;
-        uint8_t   valid_flag = 0;
-        uintptr_t tree = 0;
-        uintptr_t packed = 0;
-        uint16_t  tree_count = 0;
-        bool      animated_ok = false;
-    };
+    using unit_skeleton_ctx_t = xray::pose::skeleton_context;
 
     inline unit_skeleton_ctx_t read_unit_skeleton_ctx(uintptr_t unit_base, uintptr_t dm_root)
     {
         unit_skeleton_ctx_t ctx{};
-        if (!unit_base) return ctx;
-
-        // get_xray_cache acaba de leer esta raíz en el mismo render.
-        ctx.dm = dm_root;
-        if (!ctx.dm) return ctx;
-
-        ctx.valid_flag = TargetProcess->Read<uint8_t>(
-            ctx.dm + offsets::damage_model::m_ValidFlag);
-        if (ctx.valid_flag != 1) return ctx;
-
-        ctx.tree = TargetProcess->Read<uintptr_t>(
-            unit_base + offsets::unit_offsets::modelTransform_offset);
-        if (!ctx.tree) return ctx;
-
-        ctx.packed = TargetProcess->Read<uintptr_t>(
-            ctx.tree + offsets::damage_model::geom_node_tree_base);
-        ctx.tree_count = TargetProcess->Read<uint16_t>(
-            ctx.tree + offsets::damage_model::geom_node_tree_count);
-
-        ctx.animated_ok = (ctx.packed != 0 && ctx.tree_count > 0);
-        return ctx;
+        ctx.dm = dm_root; // Same-frame root already read by get_xray_cache.
+        return xray::pose::read_context(unit_base, ctx.dm,
+            {offsets::damage_model::m_ValidFlag, offsets::unit_offsets::modelTransform_offset,
+             offsets::damage_model::geom_node_tree_base, offsets::damage_model::geom_node_tree_count},
+            [](uintptr_t address, void* buffer, size_t size) {
+                return TargetProcess->ReadOptional(address, buffer, size);
+            });
     }
 
     inline bool read_animated_matrix(const unit_skeleton_ctx_t& ctx,
-        uint16_t tree_index,
-        part_xform_t& out)
+        uint16_t tree_index, part_xform_t& out)
     {
-        out.valid = false;
-        if (!ctx.animated_ok) return false;
-        if (tree_index == 0xFFFF) return false;
-        if (tree_index >= ctx.tree_count) return false;
-
-        const uintptr_t addr = ctx.packed + static_cast<uintptr_t>(tree_index) * 0x40;
-        if (!TargetProcess->Read(addr, out.f, 16 * sizeof(float))) return false;
-
+        out = {};
+        const auto sample = xray::pose::read_animated(ctx, tree_index,
+            [](uintptr_t address, void* buffer, size_t size) {
+                return TargetProcess->ReadOptional(address, buffer, size);
+            });
+        out.reason = sample.reason;
+        if (!sample.valid) return false;
+        std::copy(sample.f.begin(), sample.f.end(), out.f);
         out.layout = XF_CM;
         out.valid = true;
-
         return true;
     }
 
@@ -1009,7 +986,10 @@ namespace esp
         float distance_f)
     {
         const uintptr_t unit_base = unit.get_base();
+        xray::pose::diagnostic_frame pose_diagnostics(unit_base);
+        pose_diagnostics.data.ctx.reason = xray::pose::failure::not_attempted;
         auto& cache = xray::get_xray_cache(unit_base);
+        pose_diagnostics.data.ctx.dm = cache.dm_root;
         if (cache.parts.empty())
             return;
         rotation_matrix_t unit_rot = unit.getRotationMatrix();
@@ -1022,6 +1002,8 @@ namespace esp
         // CONTEXTO LEÍDO UNA SOLA VEZ POR UNIT/FRAME
         // ====================================================================
         const unit_skeleton_ctx_t skel = read_unit_skeleton_ctx(unit_base,cache.dm_root);
+        pose_diagnostics.data.ctx = skel;
+        pose_diagnostics.data.geometry_ready = true;
 
         // ====================================================================
         // VIEWPORT + MARGEN PARA CULLING 2D
@@ -1094,38 +1076,35 @@ namespace esp
                 (part.vertices.empty() || part.indices.size() < 3))
                 continue;
 
-            // ---- Transform: skeleton tree primero, bind pose de fallback ----
-            // Cacheado por índice dentro de este draw. Múltiples parts con el
-            // mismo transform_index NO repiten lectura DMA.
+            // Separate index spaces; both caches (including failures) reset each draw.
             const part_xform_t* p_transform = nullptr;
-
-            // animated
+            auto animated_reason = part.tree_index == 0xFFFF ?
+                xray::pose::failure::index_missing : skel.reason;
+            auto bind_reason = xray::pose::failure::not_attempted;
             if (skel.animated_ok && part.tree_index != 0xFFFF)
             {
-                auto it = s_animated_cache.find(part.tree_index);
-                if (it == s_animated_cache.end())
-                {
-                    part_xform_t tmp{};
-                    if (read_animated_matrix(skel, part.tree_index, tmp))
-                        it = s_animated_cache.emplace(part.tree_index, tmp).first;
-                }
-                if (it != s_animated_cache.end())
-                    p_transform = &it->second;
+                auto [it, inserted] = s_animated_cache.try_emplace(part.tree_index);
+                if (inserted) read_animated_matrix(skel, part.tree_index, it->second);
+                animated_reason = it->second.reason;
+                if (it->second.valid) p_transform = &it->second;
             }
-
-            // bind pose fallback
+            const bool used_animated = p_transform != nullptr;
             if (!p_transform)
             {
-                auto it = s_bind_cache.find(part.transform_index);
-                if (it == s_bind_cache.end())
-                {
-                    part_xform_t tmp{};
-                    if (read_part_transform(cache.matrix_array_base, part.transform_index, tmp))
-                        it = s_bind_cache.emplace(part.transform_index, tmp).first;
-                }
-                if (it != s_bind_cache.end())
-                    p_transform = &it->second;
+                auto [it, inserted] = s_bind_cache.try_emplace(part.transform_index);
+                if (inserted) read_part_transform(cache.matrix_array_base, part.transform_index, it->second);
+                bind_reason = it->second.reason;
+                if (it->second.valid) p_transform = &it->second;
             }
+            const auto pose_source = xray::pose::selected(used_animated, p_transform != nullptr);
+            xray::pose::record(pose_diagnostics.data, part.name.c_str(), part.tree_index,
+                part.transform_index, pose_source, animated_reason, bind_reason,
+                p_transform ? p_transform->f : nullptr,
+                kind == xray_part_kind_t::GunBarrel || kind == xray_part_kind_t::CannonBreech);
+            // Missing transforms are not identity. Bind-pose fallback is amber,
+            // so a static cannon cannot silently masquerade as a live pose.
+            if (pose_source == xray::pose::source::none) continue;
+            color = xray::pose::display_color(pose_source, color);
 
             // ---- Alpha ----
             if (sdk::xray_module_alpha < 1.0f)
