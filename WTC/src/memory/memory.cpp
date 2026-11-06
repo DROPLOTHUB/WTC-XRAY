@@ -64,7 +64,7 @@ void c_memory::Disconnect()
 
 bool c_memory::DumpMemoryMap(bool debug)
 {
-	LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"" };
+	LPCSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"" };
 	int argc = 3;
 	if (debug)
 	{
@@ -97,7 +97,7 @@ bool c_memory::DumpMemoryMap(bool debug)
 
 	if (pPhysMemMap->cMap == 0)
 	{
-		printf("[!] Failed to get physical memory map\n");
+		LOG("[!] Failed to get physical memory map\n");
 		VMMDLL_MemFree(pPhysMemMap);
 		VMMDLL_Close(handle);
 		return false;
@@ -165,7 +165,7 @@ bool c_memory::Init(std::string process_name, bool memMap, bool debug)
 	{
 		LOG("inizializing...\n");
 	reinit:
-		LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"", (LPSTR)"", (LPSTR)"" };
+		LPCSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"", (LPSTR)"", (LPSTR)"" };
 		DWORD argc = 3;
 		if (debug)
 		{
@@ -461,7 +461,7 @@ uintptr_t c_memory::GetImportTableAddress(std::string import, std::string proces
 	return addr;
 }
 
-VOID cbAddFile(_Inout_ HANDLE h, _In_ LPSTR uszName, _In_ ULONG64 cb, _In_opt_ PVMMDLL_VFS_FILELIST_EXINFO pExInfo)
+VOID cbAddFile(_Inout_ HANDLE h, _In_ LPCSTR uszName, _In_ ULONG64 cb, _In_opt_ PVMMDLL_VFS_FILELIST_EXINFO pExInfo)
 {
 	if (h && uszName && strcmp(uszName, "dtb.txt") == 0)
 		*static_cast<ULONG64*>(h) = cb;

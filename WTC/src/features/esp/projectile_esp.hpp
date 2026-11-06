@@ -12,6 +12,7 @@
 #include "../../core/runtime_context.hpp"
 #include "projectile_ecs.hpp"
 #include "projectile_visibility.hpp"
+#include "missile_alerts.hpp"
 
 namespace projectile_esp
 {
@@ -42,6 +43,7 @@ namespace projectile_esp
 
         struct State
         {
+            missile_alerts::State alerts;
             std::vector<Projectile> projectiles;
             std::vector<projectile_ecs::Candidate> candidates;
             std::vector<Track> tracks;
@@ -91,6 +93,7 @@ namespace projectile_esp
     inline void clear_cache()
     {
         auto& s = detail::state();
+        s.alerts.reset();
         s.projectiles.clear();
         s.candidates.clear();
         s.tracks.clear();
@@ -326,7 +329,7 @@ namespace projectile_esp
         s.diagnostics = {};
         s.filtered = 0;
         s.local_source = detail::LocalSource::none;
-        if (sdk::projectile_incoming_only)
+        if (sdk::projectile_incoming_only || missile_alerts::capture_settings().enabled)
             s.local_source = detail::resolve_local_position(base, confirmed_local, s.local_position);
         s.local_valid = (s.local_source != detail::LocalSource::none);
         if (sdk::projectile_incoming_only)
@@ -569,6 +572,9 @@ namespace projectile_esp
         }
     }
 
+    // Render-thread snapshot; no guidance lock is implied by this readout.
+    inline missile_alerts::Readout approach_readout() { return detail::state().alerts.readout; }
+
     inline void draw(ImDrawList* dl, const ViewMatrix_t& view_matrix, ImVec2 screen_size,
         const vec3_t* confirmed_local = nullptr)
     {
@@ -592,8 +598,19 @@ namespace projectile_esp
         }
         auto& s = detail::state();
         read_all(base, s.projectiles, confirmed_local);
+        const auto alert_settings = missile_alerts::capture_settings();
+        const double sample_s = std::chrono::duration<double>(s.sampled_at.time_since_epoch()).count();
+        s.alerts.begin_frame({s.local_position.x, s.local_position.y, s.local_position.z},
+            s.local_valid && alert_settings.enabled, sample_s);
         for (const auto& projectile : s.projectiles)
         {
+            // Only already-filtered, confirmed ESP tracks contribute, including offscreen tracks.
+            s.alerts.consider(missile_alerts::evaluate(
+                {projectile.position.x, projectile.position.y, projectile.position.z},
+                {projectile.velocity.x, projectile.velocity.y, projectile.velocity.z},
+                projectile.is_bomb, projectile.name,
+                {s.local_position.x, s.local_position.y, s.local_position.z},
+                s.alerts.local_velocity, s.alerts.velocity_valid, alert_settings));
             vec3_t end{};
             end.x = projectile.position.x + projectile.velocity.x * 0.5f;
             end.y = projectile.position.y + projectile.velocity.y * 0.5f;
@@ -621,5 +638,14 @@ namespace projectile_esp
             if (projectile.name[0] != '\0')
                 dl->AddText(ImVec2(start_screen.x + 5.0f, start_screen.y - 15.0f), color, projectile.name);
         }
+        const auto& alert = s.alerts.readout;
+        if (alert.approaching) {
+            char text[192]{};
+            std::snprintf(text, sizeof(text), runtime_language::text("APPROACH %.0fm | closing %.0fm/s | closest %.1fs | world bearing %.0f deg").c_str(),
+                alert.range_m, alert.closure_mps, alert.time_to_closest_s, alert.world_bearing_degrees);
+            dl->AddText(ImVec2(viewport->Pos.x + 20.0f, viewport->Pos.y + 60.0f), IM_COL32(255, 185, 70, 230), text);
+        }
+        const double now_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (s.alerts.consume_audio(now_s, alert_settings)) ::MessageBeep(MB_ICONWARNING);
     }
 }

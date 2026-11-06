@@ -15,9 +15,9 @@ static_assert(sizeof(std::uintptr_t) == 8);
 struct Vec3 { float x{}, y{}, z{}; };
 static_assert(sizeof(Vec3) == 12);
 struct Layout {
-    std::uintptr_t manager_rva = 0x7E89BE8;
-    std::uintptr_t rocket_selector_rva = 0x7A24860;
-    std::uintptr_t bomb_selector_rva = 0x7A23320;
+    std::uintptr_t manager_rva = 0x7E8CBE8;
+    std::uintptr_t rocket_selector_rva = 0x7A27860;
+    std::uintptr_t bomb_selector_rva = 0x7A26320;
     std::uintptr_t data_offset = 0x178;
     std::uintptr_t index_offset = 0x570;
     std::uintptr_t position_offset = 0x2C0;

@@ -211,8 +211,8 @@ namespace sdk
 
 	inline auto init() -> bool
 	{
-		// Comprobar los cuatro punteros SIN seguir un cGame invalido.
-		// Los offsets incorporados pueden corresponder a otra version del juego.
+		// Comprobar los cuatro punteros SIN seguir un cGame inválido. La API
+		// puede corresponder a otra versión aunque su JSON sea correcto.
 		const startup_pointer_probe::layout fields{
 			offsets::cgame_offset,offsets::localplayer_offset,
 			offsets::cgame_offsets::ballistics_offset,

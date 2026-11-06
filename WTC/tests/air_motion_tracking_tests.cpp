@@ -1,6 +1,7 @@
 #include <cmath>
 struct vec3_t {float x=0,y=0,z=0;};
 #include "../src/features/esp/air_lead_tracking.hpp"
+#include "../src/core/offset_api_mapping.hpp"
 #include <cassert>
 #include <cstdio>
 #include <filesystem>
@@ -11,13 +12,13 @@ struct vec3_t {float x=0,y=0,z=0;};
 using namespace esp::air_lead_tracking;
 int main(){
     motion_state state{};vec3_t velocity{200,0,0},acceleration{0,30,0};
-    auto sample=observe(state,{},1,&velocity,&acceleration);assert(sample.valid && sample.provenance==source::native && sample.acceleration.y==30);
+    auto sample=observe(state,{},1,&velocity,&acceleration);assert(sample.valid && sample.provenance==source::api && sample.acceleration.y==30);
     esp::air_lead_model::TurnState turn{};
     assert(std::fabs(esp::air_lead_model::update_turn_state(sample.velocity,sample.acceleration,sample.dt,1,&turn)-.15f)<1e-5f);
     velocity={201.5f,0,0};sample=observe(state,{10,0,0},1.05,&velocity);assert(sample.acceleration.x>0 && sample.acceleration.x<=30.01f);
     // Stops are not overridden by an old moving EMA.
     velocity={};observe(state,{20,0,0},1.1,&velocity);sample=observe(state,{20,0,0},1.15,&velocity);
-    assert(sample.valid && sample.provenance==source::native && sample.velocity.x==0);
+    assert(sample.valid && sample.provenance==source::api && sample.velocity.x==0);
     sample=observe(state,{20,0,0},2);assert(!sample.valid && sample.reset);
     sample=observe(state,{20,0,0},2.03);assert(sample.valid && sample.velocity.x==0);
     state={};assert(!observe(state,{},0).valid);sample=observe(state,{6,0,0},.03);assert(sample.valid && std::abs(sample.velocity.x-200)<.001f);
@@ -31,6 +32,11 @@ int main(){
     assert(lead_velocity({},{6,0,0},0,{7,0,0}).x==7);
     solve_context first{};auto next=first;next.speed=800;assert(!(first==next));first=next;next.weapon=3;assert(!(first==next));
     first=next;next.turn=true;assert(!(first==next));first=next;next.delay=.1f;assert(!(first==next));
+    offset_api_payload::manifest remote;remote.entries["Unit.m_AirContainer"]=0x100;remote.entries["AirContainer.m_Velocity"]=0x200;
+    assert(offset_api_mapping::air_velocity_available(remote));assert(!offset_api_mapping::air_acceleration_available(remote));
+    remote.entries["AirContainer.m_Acceleration"]=0;assert(!offset_api_mapping::air_acceleration_available(remote));
+    remote.entries["AirContainer.m_Acceleration"]=0x218;assert(offset_api_mapping::air_acceleration_available(remote));
+    remote.entries.erase("Unit.m_AirContainer");assert(!offset_api_mapping::air_acceleration_available(remote));
     std::ifstream in(std::filesystem::path(__FILE__).parent_path().parent_path()/"src/features/esp/esp.hpp");assert(in);
     const std::string code{std::istreambuf_iterator<char>(in),{}};
     assert(code.find("vec3_t origin = frame.local_pos;")!=std::string::npos);
@@ -39,6 +45,6 @@ int main(){
     assert(code.find("shooter.sample.acceleration,air_velocity,air_acceleration")!=std::string::npos);
     assert(code.find("motion.dt,unit_base,&cache.turn_state")!=std::string::npos);
     assert(code.find("previous_context==context")!=std::string::npos);
-    assert(code.find("if(offsets::air_acceleration_offset_available)")!=std::string::npos);
-    std::puts("PASS native/derived movement, current acceleration drives turn, stop, gaps, teleport, invalid samples, ammo context and aircraft origin");
+    assert(code.find("if(offsets::api_air_acceleration_ready)")!=std::string::npos);
+    std::puts("PASS native/derived movement, current acceleration drives turn, stop, gaps, teleport, invalid samples, API field coverage, ammo context and aircraft origin");
 }

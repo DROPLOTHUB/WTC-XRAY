@@ -5,7 +5,7 @@
 #include <thread>
 #include <algorithm>
 #include "runtime_context.hpp"
-#include "../game/offsets.hpp"
+#include "offset_auto_update.hpp"
 
 namespace core
 {
@@ -44,7 +44,7 @@ namespace core
             return;
 
         if (reason && reason[0] != '\0')
-            LOG("[STATE] %d -> %d (%s)\n", static_cast<int>(prev), static_cast<int>(state), reason);
+            LOG("[STATE] %d -> %d (%s)\n", static_cast<int>(prev), static_cast<int>(state), runtime_language::text(reason).c_str());
         else
             LOG("[STATE] %d -> %d\n", static_cast<int>(prev), static_cast<int>(state));
     }
@@ -104,13 +104,41 @@ namespace core
             return false;
         }
 
-        LOG("[SDK INIT] Using built-in offsets (RVA 0x%zx).\n", offsets::cgame_offset);
+        const bool using_api=offset_auto_update::load_on_reconnect();
+        if(!using_api) LOG("[SDK INIT] Sin caché API aplicable; probando RVA incorporado 0x%zx.\n", offsets::cgame_offset);
         if(sdk::init()) {
-            LOG("[SDK INIT] Successfully initialized with built-in offsets.\n");
+            offset_auto_update::runtime_validated();
             return true;
         }
-        LOG("Failed to initialize sdk: %s (cGame RVA 0x%zx).\n",
-            sdk::startup_error,offsets::cgame_offset);
+        if(using_api) {
+            LOG("[SDK INIT] API cache incompatible: %s (cGame RVA 0x%zx)\n",
+                runtime_language::text(sdk::startup_error).c_str(),offsets::cgame_offset);
+            offset_auto_update::rollback_after_failure();
+            if(offset_auto_update::load_backup_for_recovery() && sdk::init()) {
+                offset_auto_update::accept_recovered_backup();
+                LOG("[SDK INIT] Running with previously cached API offsets.\n");
+                offset_auto_update::runtime_validated();
+                return true;
+            }
+            offset_auto_update::reject_incompatible_cache();
+            offset_auto_update::restore_built_in_offsets();
+            offsets::api_ground_velocity_ready=false;
+            offsets::api_ballistics_ready=false;
+            offsets::api_reload_ready=false;
+            offsets::api_invulnerable_ready=false;
+            offsets::api_invul_timer_ready=false;
+            offsets::api_air_velocity_ready=false;
+            if(sdk::init()) {
+                LOG("[SDK INIT] Running with compiled fallback offsets; API cache bypassed.\n");
+                offset_auto_update::runtime_validated();
+                return true;
+            }
+        } else {
+            // A freshly staged but unreadable cache must not survive a bad init.
+            offset_auto_update::rollback_after_failure();
+        }
+        LOG("Failed to initialize sdk: %s (cGame RVA 0x%zx). Check API/game version.\n",
+            runtime_language::text(sdk::startup_error).c_str(),offsets::cgame_offset);
         return false;
     }
 
@@ -179,7 +207,7 @@ namespace core
                 runtime_connected.store(false);
                 next_battle_state_poll_tick.store(0, std::memory_order_relaxed);
                 misc::reset_runtime_cache();
-                sdk::manual_reload_status = "SDK offsets invalid; update game version";
+                sdk::manual_reload_status = "SDK offsets invalid; update API/game version";
                 next_reconnect_attempt_tick.store(GetTickCount64() + 30000, std::memory_order_relaxed);
                 set_runtime_state(runtime_state_t::Disconnected, "reload failed; retry 30s");
                 return;

@@ -29,7 +29,7 @@ int main() {
     assert(adjacent_pointer_fields::read_pair(base,0xa0,0x78,a,b,reader));
     assert(reads==2 && a==transform && b==header);
     assert(!adjacent_pointer_fields::read_pair(base,0x78,0x180,a,b,reader));
-    assert(reads==2); // Offsets locales distantes: caller debe leer cada campo
+    assert(reads==2); // API offsets distantes: caller debe leer cada campo
     assert(!adjacent_pointer_fields::read_pair(std::numeric_limits<std::uintptr_t>::max(),0x78,0xa0,a,b,reader));
     assert(reads==2); // no envolver dirección
     a=header;b=transform;

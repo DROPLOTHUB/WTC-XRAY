@@ -44,6 +44,7 @@ inline constexpr auto bool_bindings = std::to_array<bool_binding_t>({
         { &menu_preset_t::bShowModuleTransmission, &sdk::bShowModuleTransmission },
         { &menu_preset_t::xray_alpha_falloff, &sdk::xray_alpha_falloff },
         { &menu_preset_t::air_lead_enabled, &sdk::air_lead_enabled },
+        { &menu_preset_t::g2a_lead_enabled, &esp::g2a_lead::enabled },
         { &menu_preset_t::air_lead_coverage_opacity, &sdk::air_lead_coverage_opacity },
         { &menu_preset_t::air_lead_use_simulation, &sdk::air_lead_use_simulation },
         { &menu_preset_t::air_lead_use_weapon_position, &sdk::air_lead_use_weapon_position },

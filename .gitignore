@@ -2,7 +2,6 @@
 /.gh-publish/
 /.projectile-check/
 /.optimization-backup/
-/v5.16 A2A Movimiento Relativo1/
 /build/
 
 # Local IDE state and build output
@@ -33,6 +32,19 @@
 # External SDK: obtain separately; do not commit vendor files
 /WTC/lib/dma/*
 !/WTC/lib/dma/README.md
+
+# Private validation, runtime cache, captures and journals
+.validation/
+*.cache*
+*.bak
+*.tmp
+*.dmp
+*.dump
+*.tlog
+*.idb
+*.screenshot*
+missile_registry*
+missiles_registry*
 
 # Local runtime data
 wtc_menu.cfg

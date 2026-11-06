@@ -31,35 +31,41 @@ inline constexpr float horizon = max_steps * time_step;
 
 // Signed horizontal turn rate; velocity is NOT normalized in the numerator.
 inline float turn_rate(const vec3_t& v, const vec3_t& a) {
-    const float s2 = v.x*v.x + v.z*v.z;
-    return s2 < 1.0f ? 0.0f : std::clamp((v.x*a.z-v.z*a.x)/s2, -0.8f, 0.8f);
+    if (!finite(v) || !finite(a)) return 0;
+    const double s2 = double(v.x)*v.x + double(v.z)*v.z;
+    return s2 < 1.0 ? 0.0f : static_cast<float>(std::clamp(
+        (double(v.x)*a.z-double(v.z)*a.x)/s2, -0.8, 0.8));
 }
 inline vec3_t propagate(const vec3_t& p, const vec3_t& v, const vec3_t& a, float t) {
     if (!finite(p) || !finite(v) || !finite(a) || !std::isfinite(t)) return p;
     t = std::clamp(t, 0.0f, horizon + 0.25f);
-    const float speed = std::sqrt(v.x*v.x + v.z*v.z);
+    const double speed = std::hypot(double(v.x), double(v.z));
     if (speed < 0.1f) return p + v*t; // no inferred launch direction at rest
-    const float along = std::clamp((v.x*a.x + v.z*a.z)/speed, -12.0f, 8.0f);
-    const float omega = turn_rate(v, a);
-    float active = std::min(t, 0.6f);
-    if (along < -0.01f) active = std::min(active, speed / -along);
-    // Fixed, small midpoint quadrature, independent of flight duration.
-    const int n = std::max(1, static_cast<int>(std::ceil(active / 0.05f)));
-    const float dt = active/n;
-    vec3_t out = p;
-    for (int i=0; i<n; ++i) {
-        const float mid = (i+0.5f)*dt;
-        const float s = std::max(0.0f, speed + along*mid);
-        const float c = std::cos(omega*mid), sn = std::sin(omega*mid);
-        out.x += (v.x*c-v.z*sn) * (s/speed) * dt;
-        out.z += (v.x*sn+v.z*c) * (s/speed) * dt;
+    const double along = std::clamp((double(v.x)*a.x + double(v.z)*a.z)/speed, -12.0, 8.0);
+    const double omega = turn_rate(v, a);
+    double active = std::min(double(t), 0.6);
+    if (along < -0.01) active = std::min(active, speed / -along);
+    // Exact integrals of (speed + along*u) * exp(i*omega*u).
+    // Series near zero avoid cancellation and include the straight-line limit.
+    const double q = omega*active, q2 = q*q;
+    double ic, is, jc, js;
+    if (std::abs(q) < 0.01) {
+        ic = active*(1-q2/6+q2*q2/120);
+        is = active*q*(0.5-q2/24+q2*q2/720);
+        jc = active*active*(0.5-q2/8+q2*q2/144);
+        js = active*active*q*(1.0/3-q2/30+q2*q2/840);
+    } else {
+        ic = active*std::sin(q)/q;
+        is = active*(1-std::cos(q))/q;
+        jc = active*active*(q*std::sin(q)+std::cos(q)-1)/q2;
+        js = active*active*(std::sin(q)-q*std::cos(q))/q2;
     }
-    const float final_speed = std::max(0.0f, speed+along*active);
-    const float c = std::cos(omega*active), sn = std::sin(omega*active);
-    out.x += (v.x*c-v.z*sn)*(final_speed/speed)*(t-active);
-    out.z += (v.x*sn+v.z*c)*(final_speed/speed)*(t-active);
-    out.y += v.y*t; // do not extrapolate terrain bumps as vertical acceleration
-    return out;
+    const double coast = std::max(0.0, speed+along*active)*(t-active);
+    const double forward = speed*ic+along*jc+coast*std::cos(q);
+    const double sideways = speed*is+along*js+coast*std::sin(q);
+    return {static_cast<float>(p.x+(v.x*forward-v.z*sideways)/speed),
+        p.y+v.y*t, // terrain bumps are not vertical acceleration
+        static_cast<float>(p.z+(v.z*forward+v.x*sideways)/speed)};
 }
 // Snapshot position is old, DMA velocity is current: integrate backwards from
 // current velocity over the short sample age, then solve at age=0. Constant
@@ -107,46 +113,71 @@ inline void step(vec3_t& p, vec3_t& v, float k, bool mach, float dt) {
     p = p + (old+v)*(0.5f*dt);
 }
 inline bool trace(const vec3_t& origin, const vec3_t& aim, const Ballistics& b,
-    float k, float range, vec3_t& hit, float& time, int& steps) {
+    float k, float range, vec3_t& hit, float& time, int& steps, const vec3_t& shooter_velocity = {},
+    const vec3_t& plane_normal = {}) {
     const vec3_t d = aim-origin;
     const float len = d.length();
-    if (!std::isfinite(len) || len < 0.01f || range < 0.01f) return false;
-    vec3_t p{}, v = d*(b.speed/len); // relative coordinates avoid world-coordinate drift
+    if (!finite(origin) || !finite(aim) || !finite(shooter_velocity) || !finite(plane_normal)
+        || !std::isfinite(len) || len < 0.01f || !std::isfinite(range) || range < 0.01f
+        || !std::isfinite(k) || k < 0 || !std::isfinite(b.speed) || b.speed <= 0) return false;
+    // Legacy callers supply horizontal range. Solve supplies a fixed 3D LOS normal.
+    vec3_t normal = plane_normal;
+    if (normal.length() == 0) normal = {d.x,0,d.z};
+    const float normal_length = normal.length();
+    if (!std::isfinite(normal_length) || normal_length < 0.00001f) return false;
+    normal = normal*(1.0f/normal_length);
+    // Launch in world velocity; drag acts on the projectile, not on target-relative motion.
+    vec3_t p{}, v = d*(b.speed/len) + shooter_velocity; // relative position avoids world-coordinate drift
     float previous_range = 0;
     for (int i=0; i<max_steps; ++i) {
         const vec3_t old = p;
         step(p, v, k, b.drag > 0 && std::isfinite(b.drag), time_step);
         ++steps;
-        const float r = std::sqrt(p.x*p.x+p.z*p.z);
-        if (!finite(p) || !std::isfinite(r)) return false;
+        const float r = p.x*normal.x+p.y*normal.y+p.z*normal.z;
+        if (!finite(p) || !finite(v) || !std::isfinite(r)) return false;
         if (r >= range) {
             const float f = std::clamp((range-previous_range)/std::max(0.00001f,r-previous_range),0.0f,1.0f);
             hit = origin + old + (p-old)*f;
             time = (i+f)*time_step;
-            return true;
+            return finite(hit) && std::isfinite(time) && time > 0 && time <= horizon;
         }
-        if (r <= previous_range && i > 0) return false;
+        if (r <= previous_range) return false;
         previous_range = r;
     }
     return false;
 }
 inline Solution solve(const vec3_t& origin, const vec3_t& target, const vec3_t& velocity,
-    const vec3_t& acceleration, const Ballistics& b, float age = 0) {
+    const vec3_t& acceleration, const Ballistics& b, float age = 0,
+    const vec3_t& shooter_velocity = {}) {
     Solution result{};
     if (!finite(origin) || !finite(target) || !finite(velocity) || !finite(acceleration)
-        || !std::isfinite(b.speed) || b.speed < 50 || b.speed > 4000 || !std::isfinite(age)) return result;
+        || !finite(shooter_velocity) || shooter_velocity.length() > 150.0f
+        || !std::isfinite(b.speed) || b.speed < 50 || b.speed > 4000 || !std::isfinite(age)
+        || !std::isfinite(b.mass) || !std::isfinite(b.caliber) || !std::isfinite(b.length)
+        || !std::isfinite(b.drag)) return result;
     age = std::clamp(age, 0.0f, 0.25f);
     const float k = drag_coefficient(b, std::max(origin.y,target.y));
-    float t = (target-origin).length()/b.speed;
-    if (!std::isfinite(t) || t > horizon) return result;
+    const vec3_t los = target-origin;
+    const float distance = los.length();
+    if (!std::isfinite(distance) || distance < 0.01f || !std::isfinite(k)) return result;
+    const vec3_t normal = los*(1.0f/distance);
+    const float own_along = shooter_velocity.x*normal.x+shooter_velocity.y*normal.y+shooter_velocity.z*normal.z;
+    const float own2 = shooter_velocity.x*shooter_velocity.x+shooter_velocity.y*shooter_velocity.y+shooter_velocity.z*shooter_velocity.z;
+    const float transverse2 = std::max(0.0f, own2-own_along*own_along);
+    const float forward2 = b.speed*b.speed-transverse2;
+    // Vacuum stationary-target seed includes the inherited launch vector, not
+    // merely muzzle speed. A seed outside 8 s is not proof of no moving intercept.
+    const float closing = forward2 > 0 ? std::sqrt(forward2)+own_along : 0;
+    float t = std::min(horizon, distance/(closing > 0.01f ? closing : b.speed));
     vec3_t future = propagate(target,velocity,acceleration,t+age);
-    float elevation = 4.905f*t*t;
+    vec3_t correction = vec3_t{0,4.905f*t*t,0}-shooter_velocity*t;
     for (int i=0; i<max_iterations; ++i) {
-        const vec3_t aim{future.x, future.y+elevation, future.z};
-        const float dx = future.x-origin.x, dz = future.z-origin.z;
-        const float range = std::sqrt(dx*dx+dz*dz);
+        const vec3_t aim = future + correction;
+        if (!finite(future) || !finite(aim)) return result;
+        const vec3_t offset = future-origin;
+        const float range = offset.x*normal.x+offset.y*normal.y+offset.z*normal.z;
         vec3_t hit{};
-        if (!trace(origin,aim,b,k,range,hit,t,result.steps)) return result;
+        if (!trace(origin,aim,b,k,range,hit,t,result.steps,shooter_velocity,normal)) return result;
         const vec3_t next = propagate(target,velocity,acceleration,t+age);
         const float err = (next-hit).length();
         if (!std::isfinite(err)) return result;
@@ -158,7 +189,8 @@ inline Solution solve(const vec3_t& origin, const vec3_t& target, const vec3_t& 
             return result;
         }
         // Compare impact with target, never compensated aim with uncompensated target.
-        elevation += next.y-hit.y;
+        // Correct lateral drift as well as drop; elevation alone cannot cancel own motion.
+        correction += next-hit;
         future = next;
     }
     return result; // explicit failure, not an arbitrary final iterate

@@ -34,14 +34,14 @@ int main() {
     auto importer=main.substr(main.find("bool ImportConfig("));
     importer.resize(importer.find(R"tag(#include "gui/tactical_menu.hpp")tag"));
     assert(importer.find("save_now(")==std::string::npos);
-    const auto load=menu.find(R"tag(if(ImGui::Button("Cargar")tag");
+    const auto load=menu.find(R"tag(if(TacticalUI::Button("Cargar")tag");
     assert(load!=std::string::npos);
     const auto load_end=menu.find(R"tag(TacticalSearchFocus("Cargar"))tag",load);
     assert(load_end!=std::string::npos && menu.substr(load,load_end-load).find("save_now(")==std::string::npos);
-    const auto discard=menu.find(R"tag(if(ImGui::Button("Descartar y cargar")tag");
-    const auto discard_end=menu.find(R"tag(if(ImGui::Button("Cancelar")tag",discard);
+    const auto discard=menu.find(R"tag(if(TacticalUI::Button("Descartar y cargar")tag");
+    const auto discard_end=menu.find(R"tag(if(TacticalUI::Button("Cancelar")tag",discard);
     assert(discard!=std::string::npos&&discard_end!=std::string::npos);
     assert(menu.substr(discard,discard_end-discard).find("save_now(")==std::string::npos);
-    assert(menu.find(R"tag(if(ImGui::SmallButton("Guardar configuración")) save_now();)tag")!=std::string::npos);
+    assert(menu.find(R"tag(if(TacticalUI::SmallButton("Guardar configuración")) save_now();)tag")!=std::string::npos);
     std::puts("PASS manual save only: no debounce, F2, import, load or shutdown writes");
 }

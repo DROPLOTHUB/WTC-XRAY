@@ -39,5 +39,5 @@ int main() {
     const std::string ammo{std::istreambuf_iterator<char>(ammo_file),{}};
     assert(ammo.find("!sdk::air_lead_use_heaviest_weapon && GetBallisticsInfo()")!=std::string::npos);
     assert(ammo.find("aircraft_global_fallback=true;")!=std::string::npos);
-    std::puts("PASS historical A2A equation and local container fallback without synthetic muzzle speed");
+    std::puts("PASS historical A2A equation and API container fallback without synthetic muzzle speed");
 }

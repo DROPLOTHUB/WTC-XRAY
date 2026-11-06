@@ -21,40 +21,40 @@ namespace offsets
     namespace Global
     {
         // Selectores y manager de la tabla global suministrada mas recientemente.
-        inline uintptr_t g_RocketListIndexPtr = 0x7A24860;
-        inline uintptr_t g_BombListIndexPtr = 0x7A23320;
-        inline uintptr_t g_EntityManager = 0x7E89BE8;
+        inline uintptr_t g_RocketListIndexPtr = 0x7A27860;
+        inline uintptr_t g_BombListIndexPtr = 0x7A26320;
+        inline uintptr_t g_EntityManager = 0x7E8CBE8;
     }
 
-    inline uintptr_t alllistdata_offset = 0x7E89BE8;
-    inline uintptr_t bomb_index = 0x7A23320;
-    inline uintptr_t cgame_offset = 0x7A48848;
-    inline uintptr_t hud_offset = 0x7A47E70;
-    inline uintptr_t localplayer_offset = 0x7A1FCB0;
-    inline uintptr_t my_unit_offset = 0x7A4A7F8;
-    inline uintptr_t rocket_index = 0x7A24860;
-    inline uintptr_t is_scoping_offset = 0x7A91A6C;
-    inline uintptr_t screen_width_offset = 0x7E8E950;
-    inline uintptr_t view_matrix_offset = 0x7AA28B8;
-    inline uintptr_t view_angles_offset = 0x7A4D368;
+    inline uintptr_t alllistdata_offset = 0x7E8CBE8;
+    inline uintptr_t bomb_index = 0x7A26320;
+    inline uintptr_t cgame_offset = 0x7A4B848;
+    inline uintptr_t hud_offset = 0x7A4AE70;
+    inline uintptr_t localplayer_offset = 0x7A22CB0;
+    inline uintptr_t my_unit_offset = 0x7A4D7F8;
+    inline uintptr_t rocket_index = 0x7A27860;
+    inline uintptr_t is_scoping_offset = 0x7A94A6C;
+    inline uintptr_t screen_width_offset = 0x7E91950;
+    inline uintptr_t view_matrix_offset = 0x7AA58B8;
+    inline uintptr_t view_angles_offset = 0x7A50368;
 
-    inline uintptr_t proj_ballistics_props_positive_offset = 0x7A2D3E0;
-    inline uintptr_t proj_ballistics_props_negative_offset = 0x7A2D448;
-    inline uintptr_t bullet_props_positive_offset = 0x7A36890;
-    inline uintptr_t bullet_props_negative_offset = 0x7A368F8;
+    inline uintptr_t proj_ballistics_props_positive_offset = 0x7A303E0;
+    inline uintptr_t proj_ballistics_props_negative_offset = 0x7A30448;
+    inline uintptr_t bullet_props_positive_offset = 0x7A39890;
+    inline uintptr_t bullet_props_negative_offset = 0x7A398F8;
 
-    inline uintptr_t air_prediction_bool_offset = 0x7EB1120;
-    inline uintptr_t game_font_list_offset = 0x7F639A8;
-    inline uintptr_t game_optics_offset = 0x7A4A6C8;
-    inline uintptr_t localization_info_offset = 0x7E8B520;
-    inline uintptr_t map_drawn_this_frame_offset = 0x7A95CAC;
-    inline uintptr_t map_full_world_center_offset = 0x7A95CC0;
-    inline uintptr_t map_full_world_size_offset = 0x794B7A0;
-    inline uintptr_t map_minimap_pos_offset = 0x794B790;
-    inline uintptr_t map_minimap_size_offset = 0x794B798;
-    inline uintptr_t map_view_size_offset = 0x794B788;
-    inline uintptr_t map_world_center_offset = 0x7A95CB0;
-    inline uintptr_t tactical_map_obj_offset = 0x7A76918; // No incluido en la ultima tabla: valor anterior, pendiente de validar.
+    inline uintptr_t air_prediction_bool_offset = 0x7EB4120;
+    inline uintptr_t game_font_list_offset = 0x7F669A8;
+    inline uintptr_t game_optics_offset = 0x7A4D6C8;
+    inline uintptr_t localization_info_offset = 0x7E8E520;
+    inline uintptr_t map_drawn_this_frame_offset = 0x7A98CAC;
+    inline uintptr_t map_full_world_center_offset = 0x7A98CC0;
+    inline uintptr_t map_full_world_size_offset = 0x794E7B0;
+    inline uintptr_t map_minimap_pos_offset = 0x794E7A0;
+    inline uintptr_t map_minimap_size_offset = 0x794E7A8;
+    inline uintptr_t map_view_size_offset = 0x794E798;
+    inline uintptr_t map_world_center_offset = 0x7A98CB0;
+    inline uintptr_t tactical_map_obj_offset = 0x7A76918;
 
     namespace tactical_map_offsets
     {
@@ -64,22 +64,22 @@ namespace offsets
         inline uintptr_t bounds_max = 0x517C;
         inline uintptr_t mode_stride = 72;
     }
-    inline uintptr_t name_map_offset = 0x7A47668;
-    inline uintptr_t reload_offset1 = 0x7E89C70;
-    inline uintptr_t reload_offset2 = 0x7E89C68;
-    inline uintptr_t reload_offset3 = 0x7A168EC;
-    inline uintptr_t reload_offset4 = 0x7E89D70;
-    inline uintptr_t reload_offset5 = 0x7E89D60;
-    inline uintptr_t reload_offset6 = 0x7E89DF8;
-    inline uintptr_t reload_offset7 = 0x7E89D68;
-    inline uintptr_t ui_pos_arr_offset = 0x7A94C68;
-    inline uintptr_t function_das_get_usefull_total_time = 0xAC96A0;
+    inline uintptr_t name_map_offset = 0x7A4A668;
+    inline uintptr_t reload_offset1 = 0x7E8CC70;
+    inline uintptr_t reload_offset2 = 0x7E8CC68;
+    inline uintptr_t reload_offset3 = 0x7A198EC;
+    inline uintptr_t reload_offset4 = 0x7E8CD70;
+    inline uintptr_t reload_offset5 = 0x7E8CD60;
+    inline uintptr_t reload_offset6 = 0x7E8CDF8;
+    inline uintptr_t reload_offset7 = 0x7E8CD68;
+    inline uintptr_t ui_pos_arr_offset = 0x7A97C68;
+    inline uintptr_t function_das_get_usefull_total_time = 0xACA250;
 
-    inline uintptr_t base_game_version_str = 0x7A4DF98;
-    inline uintptr_t clock_obj = 0x7A221B0;
-    inline uintptr_t game_difficulty = 0x79B2D18;
-    inline uintptr_t is_in_hangar_offset = 0x7A3404B;
-    inline uintptr_t function_rayhit_normalized = 0x3461310;
+    inline uintptr_t base_game_version_str = 0x7A50F98;
+    inline uintptr_t clock_obj = 0x7A251B0;
+    inline uintptr_t game_difficulty = 0x79B5D28;
+    inline uintptr_t is_in_hangar_offset = 0x7A3704B;
+    inline uintptr_t function_rayhit_normalized = 0x3462BC0;
 
     // ========================================================================
     // [SECCIÓN 2] CGAME
@@ -252,7 +252,7 @@ namespace offsets
         inline uintptr_t fpvRocketCameraControlEnabled_offset = 0x1110;
         inline uintptr_t fuseModeIndex_offset = 0x1B50;
         inline uintptr_t ground_velocity_offset = 0x2100; // Unit.m_Velocity: puntero, NO vec3_t
-        inline uintptr_t& groundmovement_offset = ground_velocity_offset; // getter antiguo: mismo puntero
+        inline uintptr_t& groundmovement_offset = ground_velocity_offset; // getter antiguo: mismo puntero API
         inline uintptr_t groundmovement_velocity_offset = 0x5C; // GroundMovement.m_Velocity
         inline uintptr_t hasModuleEffectsToRepair_offset = 0x8E0;
         inline uintptr_t isAlternativeShotFreq_offset = 0x1F0;
@@ -391,11 +391,11 @@ namespace offsets
     namespace damage_model
     {
         inline uintptr_t m_ValidFlag = 0x78;
-        inline uintptr_t m_ModelContainer = 0x58;
-        inline uintptr_t m_Header = 0x368;
-        inline uintptr_t m_StateArray = 0x3F8;
-        inline uintptr_t m_StateCount = 0x400;
-        inline uintptr_t m_StaticProps = 0x3B8;
+        inline uintptr_t m_ModelContainer = 0x60;
+        inline uintptr_t m_Header = 0x370;
+        inline uintptr_t m_StateArray = 0x400;
+        inline uintptr_t m_StateCount = 0x408;
+        inline uintptr_t m_StaticProps = 0x3C0;
 
         inline uintptr_t m_PackedHeader = 0x78;
         inline uintptr_t m_TransformArray = 0xA0;
@@ -450,12 +450,14 @@ namespace offsets
     // ========================================================================
     // [SECCIÓN 12] REGISTRY
     // ========================================================================
-    // Presencia en la tabla local; las lecturas siguen requiriendo validacion.
-    inline const bool reload_offset_available = unit_offsets::visualReloadProgress_offset != 0;
-    inline const bool invulnerable_offset_available = unit_offsets::invulnerable_offset != 0;
-    inline const bool invul_timer_offset_available = unit_offsets::invulTimer_offset != 0;
-    inline const bool air_velocity_offsets_available = unit_offsets::airmovement_offset != 0 && unit_offsets::airmovement_offsets::velocity_offset != 0;
-    inline const bool air_acceleration_offset_available = air_velocity_offsets_available && unit_offsets::airmovement_offsets::acceleration_offset != 0;
+    // Disponibilidad determinada sólo por el manifiesto API validado.
+    inline bool api_ground_velocity_ready = false;
+    inline bool api_ballistics_ready = false;
+    inline bool api_reload_ready = false; // Unit.m_VisualReload del manifiesto privado, no fallback
+    inline bool api_invulnerable_ready = false; // Unit.m_Invulnerable presente en API validada
+    inline bool api_invul_timer_ready = false; // Unit.m_InvulTimer presente en API validada
+    inline bool api_air_velocity_ready = false; // Unit.m_AirContainer + AirContainer.m_Velocity API
+    inline bool api_air_acceleration_ready = false; // optional AirContainer.m_Acceleration supplied by API
 
     struct runtime_offset_entry
     {

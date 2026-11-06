@@ -24,7 +24,8 @@
 #include <filesystem>
 #include <streambuf>
 
-#define LOG( fmt, ... ) std::printf( fmt, ##__VA_ARGS__ )
+#include "utils/log/console_language.hpp"
+#define LOG(...) console_language::print(__VA_ARGS__)
 #define LOGW( fmt, ... ) std::wprintf( fmt, ##__VA_ARGS__ )
 
 // imgui includes.

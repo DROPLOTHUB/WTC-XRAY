@@ -1,4 +1,5 @@
 #include "../src/features/aimbot/ballistic_validation.hpp"
+#include "../src/core/offset_api_mapping.hpp"
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -46,5 +47,19 @@ int main(){
     round.caliber_m=0.125f;round.speed=4001.f;assert(!ballistic_validation::valid_round(round));
     round.speed=920.f;round.mass=std::numeric_limits<float>::infinity();
     assert(!ballistic_validation::valid_round(round));
-    std::puts("PASS pointer-to-ground-velocity, stopped tank, active round units");
+    offset_api_payload::manifest remote{};
+    assert(!offset_api_mapping::ground_velocity_available(remote));
+    assert(!offset_api_mapping::round_ballistics_available(remote));
+    remote.entries["Unit.m_Velocity"]=unit_field;
+    remote.entries["GroundMovement.m_Velocity"]=speed_field;
+    assert(offset_api_mapping::ground_velocity_available(remote));
+    remote.entries["Game.m_BallisticsCont"]=0x3F0;
+    remote.entries["Ballistics.m_MuzzleSpeed"]=0x2140;
+    remote.entries["Ballistics.m_Caliber"]=0x2150;
+    remote.entries["Ballistics.m_Mass"]=0x214C;
+    remote.entries["Ballistics.m_Length"]=0x2154;
+    assert(offset_api_mapping::round_ballistics_available(remote));
+    remote.entries["Ballistics.m_Caliber"]=0;
+    assert(!offset_api_mapping::round_ballistics_available(remote));
+    std::puts("PASS pointer-to-ground-velocity, stopped tank, active round units and API provenance");
 }

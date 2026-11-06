@@ -47,6 +47,7 @@ struct menu_preset_t {
     bool bShowModuleTransmission{};
     bool xray_alpha_falloff{};
     bool air_lead_enabled{};
+    bool g2a_lead_enabled{};
     bool air_lead_coverage_opacity{};
     bool air_lead_use_simulation{};
     bool air_lead_use_weapon_position{};
@@ -245,6 +246,7 @@ namespace sdk {
     inline int key_show_ammorack{};
     inline int key_show_fueltank{};
 }
+namespace esp::g2a_lead { inline bool enabled{}; }
 struct bool_binding_t { bool menu_preset_t::* preset; bool* runtime; };
 struct float_binding_t { float menu_preset_t::* preset; float* runtime; };
 struct color_binding_t { ImVec4 menu_preset_t::* preset; ImVec4* runtime; };
@@ -264,7 +266,7 @@ int main(){
     for(size_t i=0;i<bool_bindings.size();++i) broken[i]=bool_bindings[i];
     assert(!complete_preset_bindings(broken));
     assert(broken[bool_bindings.size()].runtime==nullptr);
-    assert(bool_bindings.size()==57 && float_bindings.size()==22);
+    assert(bool_bindings.size()==58 && float_bindings.size()==22);
     assert(color_bindings.size()==23 && int_bindings.size()==17);
     exercise(bool_bindings,true);exercise(float_bindings,12.5f);
     exercise(color_bindings,ImVec4{.1f,.2f,.3f,1.f});exercise(int_bindings,42);

@@ -6,8 +6,8 @@ inline vec3_t minus(vec3_t a,vec3_t b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline vec3_t scale(vec3_t a,float s){return {a.x*s,a.y*s,a.z*s};}
 inline bool bounded(vec3_t v,float maximum){return air_lead_model::finite(v)&&air_lead_model::distance_between(v,{})<=maximum;}
 inline vec3_t filter(vec3_t old,vec3_t next,float dt,float tau){return plus(old,scale(minus(next,old),1.f-std::exp(-dt/tau)));}
-enum class source {none,native,positions};
-inline const char* label(source s){return s==source::native ? "Velocidad nativa" : s==source::positions ? "Velocidad derivada de posiciones" : "Sin velocidad fiable";}
+enum class source {none,api,positions};
+inline const char* label(source s){return s==source::api ? "Velocidad API" : s==source::positions ? "Velocidad derivada de posiciones" : "Sin velocidad fiable";}
 struct motion_state {
     vec3_t position{},measured{},filtered_velocity{},filtered_acceleration{},native_velocity{},native_acceleration{};
     double position_time=0,native_time=0,last_time=0;
@@ -44,7 +44,7 @@ inline estimate observe(motion_state& state,vec3_t position,double time,
     if(native_ok && air_lead_model::distance_between(*native_velocity,{})<.5f && measured_now &&
         air_lead_model::distance_between(measured,{})>10.f)native_ok=false;
     if(native_ok) {
-        out.velocity=*native_velocity;out.provenance=source::native;out.valid=true;
+        out.velocity=*native_velocity;out.provenance=source::api;out.valid=true;
         const double dt=time-state.native_time;
         if(native_acceleration && bounded(*native_acceleration,160.f))out.acceleration=*native_acceleration;
         else if(state.have_native && dt>=.025 && dt<=.55) {
@@ -70,7 +70,7 @@ struct solve_context {
     float speed=0,mass=0,caliber=0,drag=0,delay=0;
     int weapon=-1,selected=-1;
     bool caliber_mm=false,heaviest=false,weapon_origin=false,turn=false,global_fallback=false;
-    bool native_velocity=false,native_acceleration=false;
+    bool api_velocity=false,api_acceleration=false;
     bool operator==(const solve_context&) const=default;
 };
 }

@@ -1,10 +1,15 @@
+#include "gui/runtime_language.hpp"
 #include "includes.hpp"
 #include "core/core.hpp"
 #include "core/app_version.hpp"
+#include "features/esp/g2a_settings.hpp"
 #include "core/config.hpp"
 #include "core/hotkey_validation.hpp"
 #include "core/missile_registry_storage.hpp"
 #include "gui/overlay_profile_position.hpp"
+#include "gui/menu_preferences.hpp"
+#include "features/aimbot/ammunition_quality.hpp"
+#include "core/quality_diagnostics.hpp"
 #include <commdlg.h>
 #include <dcomp.h>
 #include <dxgi1_2.h>
@@ -166,6 +171,10 @@ namespace GUI
         bool projectile_incoming_use_localplayer = true;
         bool projectile_aam_only = true;
         std::map<std::string,bool> missile_overrides;
+        menu_preferences::settings ui;
+        std::map<std::string,projectile_visibility::category> missile_categories;
+        projectile_visibility::category_policy_map missile_policy{};
+        missile_alerts::Settings alerts;
         std::array<bool,esp::radar::icons::visible.size()> radar_kinds = [] {
             std::array<bool,esp::radar::icons::visible.size()> result{}; result.fill(true); return result; }();
         float projectile_incoming_distance = 3000.0f;
@@ -231,6 +240,7 @@ namespace GUI
 
         // Air Lead
         bool  air_lead_enabled = false;
+        bool  g2a_lead_enabled = false;
         bool  air_lead_use_simulation = true;
         ImVec4 air_lead_sim_color = ImVec4(0.0f, 1.0f, 1.0f, 1.0f);
         float air_lead_opacity = 0.60f;
@@ -305,6 +315,10 @@ namespace GUI
         for (const auto& i : int_bindings)    preset.*(i.preset) = *i.runtime;
         preset.monitor_index = sdk::monitor_index;
         preset.missile_overrides = projectile_visibility::capture();
+        preset.ui = menu_preferences::current;
+        preset.missile_categories=projectile_visibility::capture_category_overrides();
+        preset.missile_policy=projectile_visibility::capture_category_policy();
+        preset.alerts=missile_alerts::capture_settings();
         preset.radar_kinds = esp::radar::icons::visible;
         preset.name = presets[std::clamp(active_preset,0,static_cast<int>(presets.size())-1)].name;
         return preset;
@@ -318,6 +332,11 @@ namespace GUI
         for (const auto& i : int_bindings)    *i.runtime = preset.*(i.preset);
         sdk::monitor_index = clamp_monitor_index(preset.monitor_index, sdk::monitor_count);
         projectile_visibility::apply(preset.missile_overrides);
+        menu_preferences::current = preset.ui;
+        runtime_language::set_language(menu_preferences::current.language);
+        projectile_visibility::apply_category_overrides(preset.missile_categories);
+        projectile_visibility::apply_category_policy(preset.missile_policy);
+        missile_alerts::apply_settings(preset.alerts);
         esp::radar::icons::visible = preset.radar_kinds;
     }
 
@@ -412,7 +431,7 @@ namespace GUI
             }
             if (auto it=values.find(prefix+"missile_count"); it!=values.end()) {
                 const int count=std::clamp(config::parse_int(it->second,0),0,
-                    static_cast<int>(projectile_visibility::max_names));
+                    static_cast<int>(projectile_visibility::max_names*2));
                 for (int j=0;j<count;++j) {
                     auto item=values.find(prefix+"missile_"+std::to_string(j));
                     if (item==values.end()) continue;
@@ -509,6 +528,7 @@ namespace GUI
 
             // Air Lead
             read_bool("air_lead_enabled", loaded.air_lead_enabled);
+            read_bool("g2a_lead_enabled", loaded.g2a_lead_enabled);
             read_bool("air_lead_use_simulation", loaded.air_lead_use_simulation);
             read_color("air_lead_sim_color", loaded.air_lead_sim_color);
             read_float("air_lead_opacity", loaded.air_lead_opacity);
@@ -543,6 +563,45 @@ namespace GUI
             read_float("esp_font_size_invul", loaded.esp_font_size_invul);
             read_float("esp_font_size_module", loaded.esp_font_size_module);
 
+            loaded.missile_categories.clear();
+            int category_count=0;read_int("missile_category_count",category_count);
+            for(int j=0;j<std::clamp(category_count,0,16384);++j) {
+                const auto it=values.find(prefix+"missile_category_"+std::to_string(j));
+                if(it==values.end())continue;
+                const auto colon=it->second.find(':');
+                if(colon==std::string::npos || colon+2!=it->second.size())continue;
+                const int value=it->second.back()-'0';
+                const auto name=projectile_visibility::hex_decode(std::string_view(it->second).substr(0,colon));
+                if(value>=0 && value<4 && projectile_visibility::category_name_allowed(name))
+                    loaded.missile_categories[name]=static_cast<projectile_visibility::category>(value);
+            }
+            for(std::size_t j=0;j<loaded.missile_policy.size();++j) {
+                const auto it=values.find(prefix+"missile_policy_"+std::to_string(j));
+                int value=it==values.end()?0:config::parse_int(it->second,0);
+                loaded.missile_policy[j]=static_cast<projectile_visibility::category_policy>(value>=0&&value<=2?value:0);
+            }
+            read_bool("missile_alerts",loaded.alerts.enabled);read_bool("missile_audio",loaded.alerts.audio_enabled);
+            const auto alert_number=[&](const char* name,double& value){
+                const auto it=values.find(prefix+name);if(it!=values.end())value=config::parse_float(it->second,static_cast<float>(value));
+            };
+            alert_number("alert_range",loaded.alerts.max_range_m);alert_number("alert_closure",loaded.alerts.min_closure_mps);
+            alert_number("alert_time",loaded.alerts.max_time_s);alert_number("alert_miss",loaded.alerts.max_miss_distance_m);
+            alert_number("alert_interval",loaded.alerts.audio_interval_s);loaded.alerts=missile_alerts::sanitize(loaded.alerts);
+            read_bool("menu_advanced",loaded.ui.advanced);
+            loaded.ui.language=1; // Public release default for older profiles.
+            loaded.ui.filter_static_air=true; // Older profiles retain the default filter.
+            read_int("language",loaded.ui.language);
+            loaded.ui.language=menu_preferences::valid_language(loaded.ui.language);
+            read_bool("filter_static_air",loaded.ui.filter_static_air);
+            read_int("key_g2a",loaded.ui.g2a_key);
+            loaded.ui.favorites.clear();
+            int favorite_count=0;read_int("favorite_count",favorite_count);
+            for(int j=0;j<std::clamp(favorite_count,0,128);++j) {
+                const auto it=values.find(prefix+"favorite_"+std::to_string(j));
+                if(it==values.end())continue;
+                const auto name=projectile_visibility::hex_decode(it->second);
+                if(menu_preferences::valid_favorite(name))loaded.ui.favorites.insert(name);
+            }
             // Keybinds
             read_int("xray_toggle_key", loaded.xray_toggle_key);
             read_int("key_esp_enable", loaded.key_esp_enable);
@@ -556,11 +615,11 @@ namespace GUI
             read_int("key_show_barrel", loaded.key_show_barrel);
             read_int("key_show_ammorack", loaded.key_show_ammorack);
             read_int("key_show_fueltank", loaded.key_show_fueltank);
-            std::array<int*,12> bindings = {&loaded.xray_toggle_key,&loaded.key_esp_enable,
+            std::array<int*,13> bindings = {&loaded.ui.g2a_key,&loaded.xray_toggle_key,&loaded.key_esp_enable,
                 &loaded.key_aimbot_enable,&loaded.key_air_lead_enable,&loaded.key_3d_box,&loaded.key_2d_box,
                 &loaded.key_vehicle_name,&loaded.key_distance,&loaded.key_show_crew,&loaded.key_show_barrel,
                 &loaded.key_show_ammorack,&loaded.key_show_fueltank};
-            std::array<int,12> keys{};
+            std::array<int,13> keys{};
             for(size_t j=0;j<keys.size();++j) keys[j]=*bindings[j];
             const int repaired=hotkey_validation::sanitize(keys);
             for(size_t j=0;j<keys.size();++j) *bindings[j]=keys[j];
@@ -659,7 +718,27 @@ namespace GUI
                     << projectile_visibility::hex_encode(name) << ':' << (enabled?1:0) << '\n';
             output << prefix << "projectile_incoming_distance=" << p.projectile_incoming_distance << '\n';
             output << prefix << "projectile_incoming_angle=" << p.projectile_incoming_angle << '\n';
-            output << prefix << "projectile_scan_budget=" << p.projectile_scan_budget << '\n';
+            output << prefix << "projectile_scan_budget=" << p.projectile_scan_budget << char(10);
+            output << prefix << "missile_category_count=" << p.missile_categories.size() << char(10);
+            std::size_t category_index=0;
+            for(const auto& [name,value]:p.missile_categories)output << prefix << "missile_category_" << category_index++
+                << '=' << projectile_visibility::hex_encode(name) << ':' << int(value) << char(10);
+            for(std::size_t j=0;j<p.missile_policy.size();++j)output << prefix << "missile_policy_" << j << '=' << int(p.missile_policy[j]) << char(10);
+            output << prefix << "missile_alerts=" << int(p.alerts.enabled) << char(10);
+            output << prefix << "missile_audio=" << int(p.alerts.audio_enabled) << char(10);
+            output << prefix << "alert_range=" << p.alerts.max_range_m << char(10);
+            output << prefix << "alert_closure=" << p.alerts.min_closure_mps << char(10);
+            output << prefix << "alert_time=" << p.alerts.max_time_s << char(10);
+            output << prefix << "alert_miss=" << p.alerts.max_miss_distance_m << char(10);
+            output << prefix << "alert_interval=" << p.alerts.audio_interval_s << char(10);
+            output << prefix << "menu_advanced=" << int(p.ui.advanced) << char(10);
+            output << prefix << "language=" << menu_preferences::valid_language(p.ui.language) << char(10);
+            output << prefix << "filter_static_air=" << int(p.ui.filter_static_air) << char(10);
+            output << prefix << "key_g2a=" << p.ui.g2a_key << char(10);
+            output << prefix << "favorite_count=" << p.ui.favorites.size() << char(10);
+            std::size_t favorite_index=0;
+            for(const auto& name:p.ui.favorites)output << prefix << "favorite_" << favorite_index++ << '='
+                << projectile_visibility::hex_encode(name) << char(10);
 
             output << prefix << "esp_enabled=" << (p.esp_enabled ? 1 : 0) << '\n';
             output << prefix << "radar_enabled=" << (p.radar_enabled ? 1 : 0) << '\n';
@@ -738,6 +817,7 @@ namespace GUI
             output << prefix << "xray_alpha_falloff=" << (p.xray_alpha_falloff ? 1 : 0) << '\n';
 
             output << prefix << "air_lead_enabled=" << (p.air_lead_enabled ? 1 : 0) << '\n';
+            output << prefix << "g2a_lead_enabled=" << (p.g2a_lead_enabled ? 1 : 0) << '\n';
             output << prefix << "air_lead_use_simulation=" << (p.air_lead_use_simulation ? 1 : 0) << '\n';
             write_color("air_lead_sim_color", p.air_lead_sim_color);
             output << prefix << "air_lead_opacity=" << p.air_lead_opacity << '\n';
@@ -796,6 +876,11 @@ namespace GUI
         int frame_interval = 0;
     };
 
+    bool same_alerts(const missile_alerts::Settings& a,const missile_alerts::Settings& b) {
+        return a.enabled==b.enabled && a.audio_enabled==b.audio_enabled && a.max_range_m==b.max_range_m &&
+            a.min_closure_mps==b.min_closure_mps && a.max_time_s==b.max_time_s &&
+            a.max_miss_distance_m==b.max_miss_distance_m && a.audio_interval_s==b.audio_interval_s;
+    }
     bool same_preset(const menu_preset_t& a, const menu_preset_t& b)
     {
         for (const auto& binding : bool_bindings)
@@ -811,7 +896,8 @@ namespace GUI
             if (x.x != y.x || x.y != y.y || x.z != y.z || x.w != y.w) return false;
         }
         return a.monitor_index == b.monitor_index && a.name == b.name &&
-            a.missile_overrides == b.missile_overrides && a.radar_kinds == b.radar_kinds;
+            a.missile_overrides == b.missile_overrides && a.radar_kinds == b.radar_kinds && a.ui==b.ui &&
+            a.missile_categories==b.missile_categories && a.missile_policy==b.missile_policy && same_alerts(a.alerts,b.alerts);
     }
 
     settings_snapshot_t snapshot_settings()
@@ -907,6 +993,15 @@ namespace GUI
         return true;
     }
 
+    void revert_unsaved_settings() {
+        if(!save_tracking_ready)return;
+        presets=last_saved.saved_presets;active_preset=last_saved.selected;
+        apply_preset(last_saved.current);
+        core::entity_update_interval_ms.store(last_saved.entity_interval);
+        core::frame_update_interval_ms.store(last_saved.frame_interval);
+        save_status=save_status_t::saved;
+    }
+    quality_diagnostics::diagnostics<512> quality; // render thread only
     #include "gui/tactical_menu.hpp"
 }
 
@@ -927,6 +1022,7 @@ int main(int, char**)
     UpdateCurrentMonitor(hwnd);
     missile_registry_storage::load(); // solo nombres, nunca modifica la configuracion
     config::load();
+    offset_auto_update::startup(); // before DMA workers: no live-offset races
     GUI::menu_open = true;
     GUI::initialize_save_state();
 
@@ -1015,6 +1111,8 @@ int main(int, char**)
             check_toggle(sdk::key_esp_enable, sdk::esp_enabled, last_esp);
             check_toggle(sdk::key_aimbot_enable, sdk::aimbot_enabled, last_aimbot);
             check_toggle(sdk::key_air_lead_enable, sdk::air_lead_enabled, last_air_lead);
+            static bool last_g2a=false;
+            check_toggle(menu_preferences::current.g2a_key,esp::g2a_lead::enabled,last_g2a);
             check_toggle(sdk::key_3d_box, sdk::esp_use_3d_boxes, last_3dbox);
             check_toggle(sdk::key_2d_box, sdk::esp_show_boxes, last_2dbox);
             check_toggle(sdk::key_vehicle_name, sdk::esp_show_vehicle_names, last_vname);
@@ -1165,6 +1263,8 @@ int main(int, char**)
         misc::prof_main_frame_us.store(elapsed_us, std::memory_order_relaxed);
         misc::prof_main_frame_count.fetch_add(1, std::memory_order_relaxed);
         misc::record_performance_frame(elapsed_us, render_snapshot_age_us, render_snapshot_id);
+        GUI::quality.frame_ms.add_ms(static_cast<double>(elapsed_us)/1000.0);
+        if(render_snapshot_age_us) GUI::quality.esp_ms.add_ms(static_cast<double>(misc::prof_esp_us.load())/1000.0);
     }
     missile_registry_storage::flush(); // ultimo intento, no guarda preferencias
     core::Shutdown();

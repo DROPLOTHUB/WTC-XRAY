@@ -34,11 +34,15 @@
 #include "unit_type_filter.hpp"
 #include "reload_display_policy.hpp"
 #include "invulnerability_display_policy.hpp"
+#include "../../gui/menu_preferences.hpp"
+#include "air_ghost_filter.hpp"
 #include "radar.hpp"
 #include "air_lead_prediction.hpp"
 #include "air_lead_tracking.hpp"
 #include "air_intercept.hpp"
+#include "g2a_lead.hpp"
 #include "coverage_opacity.hpp"
+#include "lead_marker_geometry.hpp"
 
 struct vec4_t {
     float x, y, z, w;
@@ -56,6 +60,30 @@ namespace esp
     // ========================================================================
     // [SECCIÓN 1] HELPERS DE DIBUJO
     // ========================================================================
+    // A2A and G2A share every visual setting and drawing primitive.
+    inline void draw_lead_marker(const vec2_t& center,const vec2_t* target=nullptr)
+    {
+        auto* draw=g_render->draw_list();
+        if(!draw)return;
+        const float size=sdk::air_lead_marker_size,thickness=sdk::air_lead_line_thickness;
+        ImVec4 tint=sdk::air_lead_sim_color;
+        const float coverage=std::clamp(tint.w,0.f,1.f)*std::clamp(sdk::air_lead_opacity,0.f,1.f);
+        if(!std::isfinite(coverage)||coverage<=0)return;
+        tint.w=coverage;
+        const ImU32 color=ImGui::ColorConvertFloat4ToU32(tint);
+        const bool safe_alpha=sdk::air_lead_coverage_opacity;
+        const lead_marker_geometry::point target_point=target ? lead_marker_geometry::point{target->x,target->y} : lead_marker_geometry::point{};
+        lead_marker_geometry::draw({center.x,center.y},size,thickness,target ? &target_point : nullptr,
+            [&](float x,float y,float radius){
+                if(safe_alpha)lead_opacity::circle(draw,ImVec2(x,y),radius,color,coverage);
+                else g_render->circle(x,y,radius,color,16);
+            },
+            [&](float x1,float y1,float x2,float y2,float width){
+                if(safe_alpha)lead_opacity::line(draw,ImVec2(x1,y1),ImVec2(x2,y2),color,width,coverage);
+                else g_render->line(x1,y1,x2,y2,color,width);
+            });
+    }
+
     inline void draw_impact_x(const vec2_t& screen_pos, ImU32 color, float size = 8.0f, float thickness = 1.5f)
     {
         g_render->line(screen_pos.x - size, screen_pos.y - size, screen_pos.x + size, screen_pos.y + size, color, thickness);
@@ -321,7 +349,7 @@ namespace esp
             entry.flag_valid=read_ok && !entry.invalid_flag;
             entry.invulnerable=entry.flag_valid && invulnerability_display_policy::invulnerable(raw);
             entry.timer_valid=false;
-            if(entry.invulnerable && offsets::invul_timer_offset_available) {
+            if(entry.invulnerable && offsets::api_invul_timer_ready) {
                 float timer=0.f;
                 if(TargetProcess->ReadOptional(unit_base+
                     offsets::unit_offsets::invulTimer_offset,&timer,sizeof(timer)) &&
@@ -1183,8 +1211,29 @@ namespace esp
         misc::prof_invul_invalid.store(0,std::memory_order_relaxed);
         misc::prof_invul_timer_shown.store(0,std::memory_order_relaxed);
 
+        struct air_filter_guard_t {
+            bool ready=false;
+            ~air_filter_guard_t(){if(!ready)air_ghost_filter::current.suspend();}
+        } air_filter_guard;
+        g2g_runtime::reset_diagnostics();
         sdk::ground_prediction_status = sdk::aimbot_enabled ? "Esperando snapshot valido" : "Desactivado";
         sdk::air_lead_status=sdk::air_lead_enabled ? "Esperando objetivo A2A" : "A2A desactivado";
+        g2a_lead::status=g2a_lead::enabled ? "G2A esperando snapshot valido / ESP" : "G2A desactivado";
+        g2a_lead::reset_diagnostics();
+        struct g2a_cache_t {
+            uintptr_t owner=0,target=0,container=0,own_container=0;uint64_t epoch=0;
+            std::chrono::steady_clock::time_point next{},sample{},latest{};
+            air_intercept::solution solution{};
+            ballistic_validation::round_data ammunition{};
+            g2a_lead::motion_track own{},enemy{};
+            g2a_lead::motion_sample own_sample{},enemy_sample{};
+        };
+        static g2a_cache_t g2a_cache;
+        // Early returns (disabled ESP, bad snapshot/lifecycle) must not retain history.
+        struct g2a_guard_t {
+            g2a_cache_t& cache;bool reached=false;
+            ~g2a_guard_t(){if(!reached)cache={};}
+        } g2a_guard{g2a_cache};
         sdk::ground_prediction_screen_known = false;
         if (!sdk::esp_enabled) {
             sdk::ground_prediction_status = "ESP desactivado: G2G depende del render ESP";
@@ -1225,6 +1274,13 @@ namespace esp
         if (frame.gui_state != GuiState::ALIVE && frame.gui_state != GuiState::SPEC)
             return;
 
+        const auto current_epoch=misc::unit_identity_epoch.load(std::memory_order_acquire);
+        const double air_filter_sample_time=std::chrono::duration<double>(curr_snapshot.captured_at.time_since_epoch()).count();
+        const double air_filter_age=std::chrono::duration<double>(std::chrono::steady_clock::now()-curr_snapshot.captured_at).count();
+        air_ghost_filter::current.begin(current_epoch,menu_preferences::current.filter_static_air &&
+            std::isfinite(air_filter_age) && air_filter_age>=0 && air_filter_age<=.25);
+        air_filter_guard.ready=true;
+
         const float esp_render_distance = std::clamp(sdk::esp_render_distance, 1000.0f, 55000.0f);
         const float esp_render_distance_sq = esp_render_distance * esp_render_distance;
         const float esp_box_distance = std::clamp(sdk::esp_box_distance, 500.0f, 3500.0f);
@@ -1244,7 +1300,11 @@ namespace esp
         }
 
         const auto radar_start=std::chrono::steady_clock::now();
-        radar::draw(curr_snapshot.positions);
+        radar::draw(curr_snapshot.positions,[&](uintptr_t base,const vec3_t& position,radar::icons::kind symbol){
+            const bool aerial=symbol==radar::icons::kind::fighter || symbol==radar::icons::kind::strike ||
+                symbol==radar::icons::kind::bomber || symbol==radar::icons::kind::helicopter;
+            return air_ghost_filter::current.visible(base,aerial,{position.x,position.y,position.z},air_filter_sample_time);
+        });
         misc::prof_esp_radar_us.store(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-radar_start).count()),std::memory_order_relaxed);
@@ -1294,10 +1354,21 @@ namespace esp
             // Rotation is sampled lazily below only for an actual A2A solve.
         }
 
+        // Positive ground classification: non-air alone also includes naval/unknown.
+        uint16_t g2a_local_type=0xFFFF;
+        const bool process_g2a=g2a_lead::enabled && !frame.local_is_plane &&
+            frame.gui_state==GuiState::ALIVE && local_unit_base==frame.local_unit_base && local_unit_base &&
+            TargetProcess->Read(local_unit_base+offsets::unit_offsets::unitType_offset,
+                &g2a_local_type,sizeof(g2a_local_type)) && classify_unit_type(g2a_local_type)==UnitClass::Ground;
+        if(g2a_lead::enabled) g2a_lead::status=process_g2a ?
+            "G2A sin objetivo aereo enemigo visible" : "G2A requiere unidad terrestre local activa";
+        uintptr_t best_g2a_base=0;
+        vec3_t best_g2a_pos{};
+        float best_g2a_score=std::numeric_limits<float>::max();
         constexpr float ballistic_render_distance = 3500.0f;
         constexpr float ballistic_render_distance_sq = ballistic_render_distance * ballistic_render_distance;
         if (frame_policy::needs_global_ballistics(frame.local_is_plane,
-            sdk::aimbot_enabled,sdk::air_lead_enabled,sdk::air_lead_use_simulation))
+            sdk::aimbot_enabled,sdk::air_lead_enabled,sdk::air_lead_use_simulation) || process_g2a)
             aimbot::BeginFrame(frame.local_is_plane,local_unit_base,
                 misc::unit_identity_epoch.load(std::memory_order_acquire));
 
@@ -1322,7 +1393,7 @@ namespace esp
         struct invul_candidate_t {uintptr_t base;vec2_t screen;float distance_sq;};
         static thread_local std::vector<invul_candidate_t> invul_candidates;
         invul_candidates.clear();
-        if (sdk::esp_show_invulnerable && offsets::invulnerable_offset_available &&
+        if (sdk::esp_show_invulnerable && offsets::api_invulnerable_ready &&
             invul_candidates.capacity()<invulnerability_display_policy::max_indicators)
             invul_candidates.reserve(invulnerability_display_policy::max_indicators);
 
@@ -1342,7 +1413,7 @@ namespace esp
         };
         static std::unordered_map<uintptr_t, TeamCacheEntry> team_cache;
         static uint64_t team_cache_epoch=0;
-        const auto current_epoch=misc::unit_identity_epoch.load(std::memory_order_acquire);
+
         if(team_cache_epoch!=current_epoch) {team_cache.clear();team_cache_epoch=current_epoch;}
         static std::unordered_map<uintptr_t, AirContainerCacheEntry> air_container_cache;
         static uint64_t air_container_epoch=0;
@@ -1363,7 +1434,7 @@ namespace esp
             };
 
         auto get_air_container = [&](uintptr_t unit_base, const std::chrono::steady_clock::time_point& now) -> uintptr_t {
-            if(!offsets::air_velocity_offsets_available)return 0;
+            if(!offsets::api_air_velocity_ready)return 0;
             auto& entry = air_container_cache[unit_base];
             if (now >= entry.next_update) {
                 entry.container = TargetProcess->Read<uintptr_t>(unit_base + offsets::unit_offsets::airmovement_offset);
@@ -1385,7 +1456,7 @@ namespace esp
             vec3_t prediction_acceleration{};
             uintptr_t last_container = 0;
             bool initialized = false;
-            std::chrono::steady_clock::time_point last_sample{};
+            std::chrono::steady_clock::time_point last_sample{},latest{};
             std::chrono::steady_clock::time_point last_update{};
             std::chrono::steady_clock::time_point next_sample{};
             std::chrono::steady_clock::time_point last_smooth{};
@@ -1403,15 +1474,15 @@ namespace esp
         const air_lead_tracking::solve_context context{ammo.velocity,ammo.mass,ammo.caliber,ammo.drag,sdk::air_lead_extra_time,
             sdk::air_lead_weapon_selection,aimbot::aircraft_weapon_trace.selected,ammo.caliber_in_mm,sdk::air_lead_use_heaviest_weapon,
             sdk::air_lead_use_weapon_position,sdk::air_lead_use_turn_prediction,aimbot::aircraft_global_fallback,
-            offsets::air_velocity_offsets_available,offsets::air_acceleration_offset_available};
+            offsets::api_air_velocity_ready,offsets::api_air_acceleration_ready};
         static air_lead_tracking::solve_context previous_context{};
         if(!(previous_context==context)){air_lead_cache.clear();previous_context=context;}
         struct native_motion_t {vec3_t velocity{},acceleration{};bool have_velocity=false,have_acceleration=false;};
         const auto read_native_motion=[&](uintptr_t container) {
             native_motion_t sample;
-            if(!container || !offsets::air_velocity_offsets_available)return sample;
+            if(!container || !offsets::api_air_velocity_ready)return sample;
             vec3d_t v{},a{};bool velocity_ok=false,acceleration_ok=false;
-            if(offsets::air_acceleration_offset_available) {
+            if(offsets::api_air_acceleration_ready) {
                 const auto pair=adjacent_value_fields::read_pair<vec3d_t>(container,
                     offsets::unit_offsets::airmovement_offsets::velocity_offset,
                     offsets::unit_offsets::airmovement_offsets::acceleration_offset,
@@ -1429,15 +1500,18 @@ namespace esp
             uintptr_t owner=0,container=0;uint64_t epoch=0,generation=0;
             air_lead_tracking::motion_state history{};air_lead_tracking::estimate sample{};
             air_lead_model::TurnState turn{};float omega=0;
-            std::chrono::steady_clock::time_point next{};
+            std::chrono::steady_clock::time_point next{},sampled_at{};
         };
         static shooter_motion_t shooter;
         const auto sample_shooter=[&](const std::chrono::steady_clock::time_point now) {
             if(shooter.owner!=local_unit_base || shooter.epoch!=current_epoch){shooter={};shooter.owner=local_unit_base;shooter.epoch=current_epoch;}
-            if(now>=shooter.next) {
+            const double interval=std::chrono::duration<double>(curr_snapshot.captured_at-shooter.sampled_at).count();
+            if(now>=shooter.next && interval>=.025) {
+                if(interval>.2){shooter.history={};shooter.turn={};}
+                shooter.sampled_at=curr_snapshot.captured_at;
                 shooter.next=now+std::chrono::milliseconds(30);
                 const auto container=get_air_container(local_unit_base,now);
-                if(shooter.container && container && shooter.container!=container){shooter.history={};shooter.turn={};}
+                if(shooter.container!=container){shooter.history={};shooter.turn={};}
                 shooter.container=container;
                 const auto native=read_native_motion(container);
                 const double timestamp=std::chrono::duration<double>(curr_snapshot.captured_at.time_since_epoch()).count();
@@ -1465,9 +1539,26 @@ namespace esp
             if(cache.shooter_base!=local_unit_base) {
                 cache=AirLeadCacheEntry{};cache.shooter_base=local_unit_base;
             }
+            // Snapshot high-water mark is independent of the last solved sample.
+            const float snapshot_age=std::chrono::duration<float>(now-curr_snapshot.captured_at).count();
+            if(!std::isfinite(snapshot_age) || snapshot_age<0 || snapshot_age>.2f ||
+                curr_snapshot.captured_at<cache.latest) {
+                cache.initialized=false;cache.motion={};cache.turn_state={};
+                if(!drew_air_lead)sdk::air_lead_status="Snapshot A2A fuera de tiempo";
+                return;
+            }
+            cache.latest=curr_snapshot.captured_at;
+            const double interval=std::chrono::duration<double>(curr_snapshot.captured_at-cache.last_sample).count();
+            if(interval>.2) {
+                cache.initialized=false;cache.motion={};cache.turn_state={};cache.next_sample={};
+            }
+            const float held_age=std::chrono::duration<float>(now-cache.last_sample).count();
+            if(!std::isfinite(held_age) || held_age<0 || held_age>.2f)cache.initialized=false;
             // DMA + filtering + solve share a cadence; rendering stays per-frame.
+            // Duplicates cannot refresh motion or renew an old solution.
             // Failed solutions are throttled too, rather than retried at render FPS.
-            if (now >= cache.next_sample) {
+            if (now >= cache.next_sample && interval>=.025) {
+                cache.last_sample=curr_snapshot.captured_at;
                 cache.next_sample = now + std::chrono::milliseconds(30);
                 vec3_t air_velocity{ 0.0f, 0.0f, 0.0f };
                 vec3_t air_acceleration{ 0.0f, 0.0f, 0.0f };
@@ -1508,16 +1599,26 @@ namespace esp
                 }
 
                 const uintptr_t air_container=get_air_container(unit_base,now);
-                if(cache.last_container && air_container && cache.last_container!=air_container) {
+                if(cache.last_container!=air_container) {
                     cache.motion={};cache.turn_state={};cache.initialized=false;
                 }
                 cache.last_container=air_container;
                 const auto native=read_native_motion(air_container);
+                // Native reads occur now, not at snapshot capture: include their latency.
+                const auto read_complete=std::chrono::steady_clock::now();
+                const float read_age=std::chrono::duration<float>(read_complete-curr_snapshot.captured_at).count();
+                const float own_age=std::chrono::duration<float>(read_complete-shooter.sampled_at).count();
+                if(!std::isfinite(read_age) || read_age<0 || read_age>.2f ||
+                    !std::isfinite(own_age) || own_age<0 || own_age>.2f) {
+                    cache.initialized=false;cache.motion={};cache.turn_state={};
+                    if(!drew_air_lead)sdk::air_lead_status="Lectura A2A fuera de tiempo";
+                    return;
+                }
                 const auto motion=air_lead_tracking::observe(cache.motion,unit_pos,
                     std::chrono::duration<double>(curr_snapshot.captured_at.time_since_epoch()).count(),
                     native.have_velocity?&native.velocity:nullptr,native.have_acceleration?&native.acceleration:nullptr);
                 if(motion.reset){cache.turn_state={};cache.initialized=false;}
-                cache.last_sample=now;cache.solve_origin=origin;
+                cache.solve_origin=origin;
                 if(!motion.valid) {
                     cache.initialized=false;
                     if(!drew_air_lead)sdk::air_lead_status="Esperando movimiento fiable del objetivo";
@@ -1530,8 +1631,7 @@ namespace esp
                 cache.prediction_acceleration = air_acceleration;
                 { // already paced by next_sample above
                     const aimbot::BallisticsData local_bal = aimbot::ballisticsData;
-                    const float sample_age = std::clamp(
-                        std::chrono::duration<float>(now - curr_snapshot.captured_at).count(), 0.0f, 0.20f);
+                    const float sample_age = read_age;
                     const float delay = std::clamp(sdk::air_lead_extra_time, 0.0f, 0.5f);
                     // Sin datos de munición reales, 300 m/s fabricados desplazaban
                     // el marcador cientos de metros: ocultarlo en vez de mentir.
@@ -1554,7 +1654,7 @@ namespace esp
                         return;
                     }
                     if(cache.initialized)cache.prediction_velocity=air_lead_tracking::lead_velocity(
-                        cache.raw_lead_point,solution.point,std::chrono::duration<float>(now-cache.last_update).count(),air_velocity);
+                        cache.raw_lead_point,solution.point,std::chrono::duration<float>(read_complete-cache.last_update).count(),air_velocity);
                     // The aim-point derivative is not the target acceleration.
                     cache.prediction_acceleration={};
                     cache.raw_lead_point = solution.point;
@@ -1563,15 +1663,22 @@ namespace esp
 
                     if (!cache.initialized) {
                         cache.smoothed_lead_point = cache.raw_lead_point;
-                        cache.last_smooth = now;
+                        cache.last_smooth = read_complete;
                         cache.initialized = true;
                     }
-                    cache.last_update = now;
+                    cache.last_update = read_complete;
                 }
             } // sampled work; only projection/smoothing below runs at render FPS
 
             if (cache.initialized)
             {
+                const auto render_now=std::chrono::steady_clock::now();
+                const float render_sample_age=std::chrono::duration<float>(render_now-cache.last_sample).count();
+                if(!std::isfinite(render_sample_age) || render_sample_age<0 || render_sample_age>.2f) {
+                    cache.initialized=false;
+                    if(!drew_air_lead)sdk::air_lead_status="Solucion A2A caducada";
+                    return;
+                }
                 float smooth_alpha = 0.5f;
                 if (sdk::air_lead_smooth_adaptive) {
                     const float min_a = std::clamp(sdk::air_lead_smooth_min_alpha, 0.05f, 0.95f);
@@ -1582,12 +1689,12 @@ namespace esp
                 }
 
                 const float dt_render = std::clamp(
-                    std::chrono::duration<float>(now - cache.last_smooth).count(), 0.0f, 0.10f);
-                cache.last_smooth = now;
+                    std::chrono::duration<float>(render_now - cache.last_smooth).count(), 0.0f, 0.10f);
+                cache.last_smooth = render_now;
                 const float tau = -1.0f / (60.0f * std::log1p(-std::clamp(smooth_alpha, 0.05f, 0.95f)));
                 const float alpha_time = 1.0f - std::exp(-dt_render / tau);
                 const float raw_age = std::clamp(
-                    std::chrono::duration<float>(now - cache.last_update).count(), 0.0f, 0.10f);
+                    std::chrono::duration<float>(render_now - cache.last_update).count(), 0.0f, 0.10f);
                 const vec3_t live_raw = cache.raw_lead_point + cache.prediction_velocity * raw_age
                     + cache.prediction_acceleration * (0.5f * raw_age * raw_age);
                 cache.smoothed_lead_point += cache.prediction_velocity * dt_render
@@ -1601,35 +1708,9 @@ namespace esp
                     vec2_t lead_screen;
                     if (world_to_screen_counted(cache.smoothed_lead_point, lead_screen, camera_matrix, projection_ctx, w2s_calls))
                     {
-                        const float size = sdk::air_lead_marker_size;
-                        const float thickness = sdk::air_lead_line_thickness;
-                        ImVec4 lead_color = sdk::air_lead_sim_color;
-                        const float coverage = std::clamp(lead_color.w,0.f,1.f) * std::clamp(sdk::air_lead_opacity,0.f,1.f);
-                        lead_color.w = coverage;
-                        const ImU32 color = ImGui::ColorConvertFloat4ToU32(lead_color);
-                        const bool safe_alpha=sdk::air_lead_coverage_opacity;
-                        auto* draw=g_render->draw_list();
-                        const float cross = size * 1.5f;
-                        if (safe_alpha) {
-                            lead_opacity::circle(draw,ImVec2(lead_screen.x,lead_screen.y),size,color,coverage);
-                            lead_opacity::line(draw,ImVec2(lead_screen.x-cross,lead_screen.y),
-                                ImVec2(lead_screen.x+cross,lead_screen.y),color,thickness,coverage);
-                            lead_opacity::line(draw,ImVec2(lead_screen.x,lead_screen.y-cross),
-                                ImVec2(lead_screen.x,lead_screen.y+cross),color,thickness,coverage);
-                        } else {
-                            g_render->circle(lead_screen.x, lead_screen.y, size, color, 16);
-                            g_render->line(lead_screen.x-cross,lead_screen.y,lead_screen.x+cross,lead_screen.y,color,thickness);
-                            g_render->line(lead_screen.x,lead_screen.y-cross,lead_screen.x,lead_screen.y+cross,color,thickness);
-                        }
-                        vec2_t unit_screen_pos;
-                        if (world_to_screen_counted(unit_pos, unit_screen_pos, camera_matrix, projection_ctx, w2s_calls))
-                        {
-                            if (safe_alpha)
-                                lead_opacity::line(draw,ImVec2(unit_screen_pos.x,unit_screen_pos.y),
-                                    ImVec2(lead_screen.x,lead_screen.y),color,thickness*.7f,coverage);
-                            else
-                                g_render->line(unit_screen_pos.x,unit_screen_pos.y,lead_screen.x,lead_screen.y,color,thickness*.7f);
-                        }
+                        vec2_t unit_screen_pos{};
+                        const bool have_target=world_to_screen_counted(unit_pos,unit_screen_pos,camera_matrix,projection_ctx,w2s_calls);
+                        draw_lead_marker(lead_screen,have_target ? &unit_screen_pos : nullptr);
                         drew_air_lead=true;
                         sdk::air_lead_own_motion_status=air_lead_tracking::label(cache.own_source);
                         sdk::air_lead_target_motion_status=air_lead_tracking::label(cache.target_source);
@@ -1680,6 +1761,10 @@ namespace esp
 
             const uint16_t raw_type = cached_info.raw_type;
             const auto unit_type_info = get_unit_type_info(unit_type, raw_type);
+            if(!air_ghost_filter::current.visible(unit_base,unit_type_info.is_plane,
+                {unit_pos.x,unit_pos.y,unit_pos.z},air_filter_sample_time)) {
+                ++cull_type;continue;
+            }
 
             if (sdk::esp_only_show_planes && !unit_type_info.is_plane) {
                 ++cull_type;
@@ -1720,6 +1805,23 @@ namespace esp
                     else
                     {
                         run_air_lead(unit, unit_pos);
+                    }
+                }
+            }
+
+            // Independent from G2G selection and A2A enable/simulation settings.
+            if(process_g2a && unit_base!=local_unit_base && unit_type_info.is_plane &&
+                !unit_type_info.is_dummy && unit_type_info.worth_to_draw && local_team!=-1 &&
+                distance_sq<=ballistic_render_distance_sq) {
+                const uint8_t team=get_unit_team(unit_base);
+                vec2_t sp{};
+                if(team!=0xFF && static_cast<int32_t>(team)!=local_team &&
+                    world_to_screen_counted(unit_pos,sp,camera_matrix,projection_ctx,w2s_calls)) {
+                    const float x=sp.x-viewport_center.x,y=sp.y-viewport_center.y;
+                    const float center_sq=x*x+y*y;
+                    const float score=center_sq+distance_sq*.05f;
+                    if(aim_fov_radius_sq>0 && center_sq<=aim_fov_radius_sq && score<best_g2a_score) {
+                        best_g2a_base=unit_base;best_g2a_pos=unit_pos;best_g2a_score=score;
                     }
                 }
             }
@@ -1850,8 +1952,8 @@ namespace esp
                 }
             }
 
-            if(sdk::esp_show_invulnerable && offsets::invulnerable_offset_available &&
-                invulnerability_display_policy::tank_type(unit_type,raw_type) &&
+            if(sdk::esp_show_invulnerable && offsets::api_invulnerable_ready &&
+                invulnerability_display_policy::ground_vehicle_type(unit_type,raw_type) &&
                 distance_sq<=sdk::esp_invul_distance*sdk::esp_invul_distance &&
                 unit_base!=local_unit_base && main_viewport &&
                 screen_pos.x>=main_viewport->Pos.x+6.f && screen_pos.y>=main_viewport->Pos.y+6.f &&
@@ -1903,6 +2005,113 @@ namespace esp
         misc::prof_esp_units_us.store(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-units_start).count()),std::memory_order_relaxed);
+        // Single prioritized G2A target; only fresh snapshots feed motion histories.
+        g2a_guard.reached=true;
+        if(!process_g2a || !best_g2a_base) {
+            g2a_cache = {};
+            g2a_lead::sample_age_ms = -1;
+            g2a_lead::own_source = "Sin velocidad fiable";
+            g2a_lead::target_source = "Sin velocidad fiable";
+            g2a_lead::acceleration_source = "Sin aceleracion fiable";
+            g2a_lead::quality = "G2A requiere unidad terrestre local activa";
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            const float age = std::chrono::duration<float>(now - curr_snapshot.captured_at).count();
+            const auto& b = aimbot::ballisticsData;
+            const ballistic_validation::round_data round{b.velocity, b.mass,
+                b.caliber * (b.caliber_in_mm ? .001f : 1.f), b.length, b.max_dist};
+            const auto& previous = g2a_cache.ammunition;
+            if (g2a_cache.owner != local_unit_base || g2a_cache.target != best_g2a_base || g2a_cache.epoch != current_epoch ||
+                previous.speed != round.speed || previous.mass != round.mass || previous.caliber_m != round.caliber_m ||
+                previous.length_m != round.length_m || previous.max_distance != round.max_distance) {
+                g2a_cache = {};
+                g2a_cache.owner = local_unit_base;
+                g2a_cache.target = best_g2a_base;
+                g2a_cache.epoch = current_epoch;
+                g2a_cache.ammunition = round;
+            }
+            air_intercept::ammunition checked{};
+            bool invalidate_solution = false;
+            if (!std::isfinite(age) || age < 0 || age > .2f || !g2a_lead::ammunition(round, checked)) {
+                invalidate_solution = true;
+            }
+            if (curr_snapshot.captured_at < g2a_cache.latest) {
+                invalidate_solution = true;
+                g2a_cache.own = {}; g2a_cache.enemy = {};
+            } else {
+                g2a_cache.latest = curr_snapshot.captured_at;
+            }
+            // sample belongs to the last observation, not the latest rendered frame.
+            const double interval = std::chrono::duration<double>(curr_snapshot.captured_at - g2a_cache.sample).count();
+            if (interval > .2) {
+                g2a_cache.own = {}; g2a_cache.enemy = {}; g2a_cache.next = {};
+                g2a_cache.solution = {};
+            }
+            const float held_age = std::chrono::duration<float>(now - g2a_cache.sample).count();
+            if (!std::isfinite(held_age) || held_age < 0 || held_age > .2f)
+                g2a_cache.solution = {};
+            if (g2a_cache.owner != local_unit_base || g2a_cache.target != best_g2a_base || g2a_cache.epoch != current_epoch) {
+                invalidate_solution = true;
+            }
+            if (invalidate_solution) {
+                g2a_cache.solution = {};
+            }
+            if (now >= g2a_cache.next && interval >= .025 && !invalidate_solution) {
+                g2a_cache.sample = curr_snapshot.captured_at;
+                g2a_cache.next = now + std::chrono::milliseconds(30);
+                vec3_t own_velocity{}; uintptr_t source = 0;
+                const bool own_known = aimbot::ReadGroundVelocity(local_unit_base, own_velocity, source);
+                const auto container = get_air_container(best_g2a_base, now);
+                if (container != g2a_cache.container || source != g2a_cache.own_container) {
+                    g2a_cache.own = {}; g2a_cache.enemy = {};
+                    g2a_cache.container = container; g2a_cache.own_container = source;
+                }
+                const auto native = read_native_motion(container);
+                const auto read_complete = std::chrono::steady_clock::now();
+                const float read_age = std::chrono::duration<float>(read_complete - curr_snapshot.captured_at).count();
+                if (!std::isfinite(read_age) || read_age < 0 || read_age > .2f) {
+                    invalidate_solution = true;
+                    g2a_cache.own = {}; g2a_cache.enemy = {}; g2a_cache.solution = {};
+                } else {
+                    const double stamp = std::chrono::duration<double>(curr_snapshot.captured_at.time_since_epoch()).count();
+                    g2a_cache.own_sample = g2a_lead::observe(g2a_cache.own, frame.local_pos, stamp,
+                        own_known ? &own_velocity : nullptr, nullptr, 150);
+                    g2a_cache.enemy_sample = g2a_lead::observe(g2a_cache.enemy, best_g2a_pos, stamp,
+                        native.have_velocity ? &native.velocity : nullptr, native.have_acceleration ? &native.acceleration : nullptr, 950);
+                    g2a_cache.solution = g2a_lead::solve_motion(frame.local_pos, best_g2a_pos,
+                        g2a_cache.own_sample, g2a_cache.enemy_sample, read_age, round);
+                }
+            }
+            // Recheck at publication: a long solve cannot publish an expired sample.
+            const float publication_age=std::chrono::duration<float>(std::chrono::steady_clock::now()-g2a_cache.sample).count();
+            if(!std::isfinite(publication_age) || publication_age<0 || publication_age>.2f) {
+                g2a_cache.solution={};invalidate_solution=true;
+            }
+            if (!invalidate_solution && g2a_cache.sample != std::chrono::steady_clock::time_point{}) {
+                g2a_lead::sample_age_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - g2a_cache.sample).count();
+                g2a_lead::own_source = air_lead_tracking::label(g2a_cache.own_sample.motion.provenance);
+                g2a_lead::target_source = air_lead_tracking::label(g2a_cache.enemy_sample.motion.provenance);
+                g2a_lead::acceleration_source = g2a_cache.enemy_sample.acceleration;
+                g2a_lead::quality = g2a_cache.solution.valid ? "Modelo acotado: giro/aceleracion 0.85 s; intercepcion 4 s" :
+                    "Sin solucion actual fiable (historial/lectura/limites)";
+            }
+            const auto& result = g2a_cache.solution;
+            g2a_lead::status = g2a_lead::reason(result.status);
+            if (result.valid) {
+                vec2_t sp{};
+                if (main_viewport && world_to_screen_counted(result.point, sp, camera_matrix, projection_ctx, w2s_calls) &&
+                    ground_prediction::screen_visible(sp.x, sp.y, main_viewport->Pos.x, main_viewport->Pos.y,
+                        main_viewport->Size.x, main_viewport->Size.y)) {
+                    vec2_t unit_screen_pos{};
+                    const bool have_target=world_to_screen_counted(best_g2a_pos,unit_screen_pos,camera_matrix,projection_ctx,w2s_calls);
+                    draw_lead_marker(sp,have_target ? &unit_screen_pos : nullptr);
+                    g2a_lead::flight_time = result.time; g2a_lead::model_error = result.error;
+                } else {
+                    g2a_lead::status = "G2A solucion fuera de pantalla";
+                }
+            }
+        }
+
         if (sdk::air_lead_only_target && has_best_air_lead_target)
         {
             run_air_lead(best_air_lead_unit, best_air_lead_pos);
@@ -1957,7 +2166,7 @@ namespace esp
                     ++unexpected; // exponer lectura incoherente sin inventar tiempo
                     if (sdk::esp_show_reload_seconds) {
                         char raw_label[24];
-                        std::snprintf(raw_label,sizeof(raw_label),"Raw %u",unsigned(visual.value));
+                        std::snprintf(raw_label,sizeof(raw_label),runtime_language::text("Raw %u").c_str(),unsigned(visual.value));
                         g_render->text({target.screen.x+18.f,target.screen.y-24.f},
                             IM_COL32(255,190,95,255),0,raw_label,esp_font,sdk::esp_font_size_reload);
                     }
@@ -2033,7 +2242,7 @@ namespace esp
         if (sdk::aimbot_enabled && has_best_aimbot_target)
         {
             const auto aimbot_start = std::chrono::steady_clock::now();
-            aimbot::run(best_aimbot_unit, best_aimbot_pos, local_pos, camera_matrix, curr_snapshot.captured_at);
+            aimbot::run(best_aimbot_unit, best_aimbot_pos, local_pos, camera_matrix, curr_snapshot.captured_at, local_unit_base, current_epoch);
             const auto aimbot_end = std::chrono::steady_clock::now();
             aimbot_us_total += static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(aimbot_end - aimbot_start).count()

@@ -127,7 +127,7 @@ static void integration_tests() {
     std::size_t count=0,offset=0;
     while((offset=misc.find("publish_frame_snapshot(std::move(next_buffer));",offset))!=std::string::npos){++count;++offset;}
     assert(count==2); // both out-of-battle and successful publication move the same owned buffer
-    assert(radar.find("template<class Allocator>")!=std::string::npos);
+    assert(radar.find("template<class Allocator,class Visibility=allow_all_contacts>")!=std::string::npos);
 }
 struct measurement {double us=0;std::size_t allocations=0,peak=0;std::uint64_t checksum=0;};
 static measurement old_run(int frames,std::size_t units) {

@@ -6,8 +6,8 @@
 #include <iterator>
 #include <string>
 int main() {
-    assert(std::string(app_version::release_name)=="v5.16 A2A Movimiento Relativo");
-    assert(std::string(app_version::sidebar_label())=="TACTICAL / v5.16");
+    assert(std::string(app_version::release_name)=="v5.25 Full Language Public");
+    assert(std::string(app_version::sidebar_label())=="TACTICAL / v5.25");
     const auto src=std::filesystem::path(__FILE__).parent_path().parent_path()/"src";
     std::ifstream menu_file(src/"gui/tactical_menu.hpp");assert(menu_file);
     const std::string menu{std::istreambuf_iterator<char>(menu_file),{}};

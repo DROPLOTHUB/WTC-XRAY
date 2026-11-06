@@ -1,31 +1,33 @@
-# Dependencias DMA externas
+# DMA development dependencies
 
-Los archivos del SDK y los binarios de terceros no se redistribuyen en este paquete. Debes obtenerlos por separado de sus autores y cumplir sus licencias. No descargues DLL sueltas desde sitios no oficiales.
+This working copy retains the five files needed for the verified Release x64 build. Generated executables, runtime DLLs and downloaded SDK archives were removed after compilation. The runtime DLLs are intentionally not included.
 
-## Para compilar (x64)
+## Building
 
-Coloca en esta carpeta un conjunto compatible de:
+Keep these five files together in this folder:
 
-| Archivo | Proyecto/proveedor |
-| --- | --- |
-| `vmmdll.h` y `vmm.lib` | [MemProcFS](https://github.com/ufrisk/MemProcFS) |
-| `leechcore.h` y `leechcore.lib` | [LeechCore](https://github.com/ufrisk/LeechCore) |
-| `FTD3XX.lib` | [FTDI D3XX](https://ftdichip.com/drivers/d3xx-drivers/) |
+| Development files | Provider | Verified local information |
+| --- | --- | --- |
+| [vmmdll.h](<vmmdll.h>), [vmm.lib](<vmm.lib>) | [MemProcFS](https://github.com/ufrisk/MemProcFS) | Header version 5.18.10; x64 import library |
+| [leechcore.h](<leechcore.h>), [leechcore.lib](<leechcore.lib>) | [LeechCore](https://github.com/ufrisk/LeechCore) | Header version 2.23; x64 import library |
+| [FTD3XX.lib](<FTD3XX.lib>) | [FTDI D3XX](https://ftdichip.com/drivers/d3xx-drivers/) | x64 DLL import library from FTD3XXLibrary 1.3.0.10 |
 
-Los encabezados del proyecto original declaran versiones **MemProcFS 5.8** y **LeechCore 2.9.1**. La versión exacta de las bibliotecas de importación originales no está identificada. Usa headers, bibliotecas de importación y DLL de versiones compatibles, todos x64; no se garantiza compatibilidad con la última versión disponible. Consulta las distribuciones SDK o las instrucciones de compilación de los autores para obtener los `.lib`.
+The original project referenced older headers (MemProcFS 5.8 and LeechCore 2.9.1). The current copies are the versions listed above. The exact MemProcFS and LeechCore import-library release versions have not been independently established; the libraries were checked for x64 architecture and linked successfully, not validated against a runtime DLL set.
 
-## Conservar la compilación local al preparar una publicación
+In [memory.cpp](<../../src/memory/memory.cpp>), only three declarations were adjusted from `LPSTR` to `LPCSTR`: the two initialization argument arrays and the file-list callback name parameter. This matches the supplied header signatures without changing arguments or control flow. No SDK header modifications or functionality removal were needed.
 
-Excluir el SDK del paquete público no significa eliminarlo del proyecto de trabajo. Mantén estos cinco archivos en la copia local y prepara la distribución en otra carpeta. Las DLL por sí solas no sustituyen los encabezados ni las bibliotecas de importación; tampoco sirven encabezados ficticios o archivos `.lib` vacíos.
+The final source was compiled in an isolated **Release | x64** build on **2026-11-05**, with **0 errors and 979 warnings**. Warnings, including C4828 source-encoding warnings under `/utf-8`, remain unresolved. After synchronizing only duplicated offset values and numeric test expectations with the supplied table, **all 58 offline suites passed in one complete run**. No test assertions or coverage were removed. Runtime behavior was not tested. See the [main build instructions and validation notes](<../../../README.md#build>).
 
-Si aparece C1083 al incluir `vmmdll.h` desde `src/memory/memory.h`, comprueba que los cinco archivos anteriores existan aquí. La ruta relativa del include es correcta. Restaura el conjunto de desarrollo de tu copia funcional, sin sobrescribir el resto del código.
+Do not replace x64 import libraries with Win32/x86 versions. If C1083 reports a missing header, restore the actual header in this folder. DLLs, renamed DLLs and empty placeholder files cannot substitute for development headers or import libraries.
 
-## Para ejecutar
+## Running after a local build
 
-Coloca `vmm.dll`, `leechcore.dll` y `FTD3XX.dll` junto al ejecutable generado en `WTC/build/x64/Release/`. Esos archivos no son necesarios para enlazar cuando las bibliotecas de importación ya están disponibles, pero sí para ejecutar. La compilación no los descarga ni copia automáticamente.
+The generated executable is `WTC/build/x64/Release/DMA-SDK.exe`; it is not present in the cleaned source tree. Move it to a runtime folder containing compatible x64 `vmm.dll`, `leechcore.dll` and `FTD3XX.dll`. These runtime files are not needed for compilation or linking, and the build does not download or copy them.
 
-MemProcFS puede requerir archivos y plugins adicionales según dispositivo y funciones utilizadas. El código original documenta también `symsrv.dll`, `dbghelp.dll` e `info.db` para su ruta FixCR3. Sigue las instrucciones de la distribución elegida; no se ha comprobado aquí la ejecución ni la lista transitiva completa.
+Use mutually compatible headers, import libraries and runtime DLLs. MemProcFS and the selected device/features may require additional provider plugins and support files. Consult the chosen official distributions; successful compilation does not establish complete runtime compatibility. Do not obtain loose DLLs from unofficial download sites.
 
-## Licencias
+## GitHub publication and licenses
 
-La licencia MIT del código propio no concede derechos sobre estas dependencias. El README original identifica MemProcFS como AGPL-3.0. Comprueba las condiciones exactas de las versiones de MemProcFS, LeechCore y FTDI que utilices y sus efectos sobre la distribución del programa combinado. Excluir los binarios de este repositorio no resuelve por sí solo esas obligaciones.
+This GitHub update explicitly tracks the five development files supplied in the user-provided ZIP, so clones include them. The [.gitignore](<../../../.gitignore>) still excludes additional untracked vendor files and runtime/build output; it does not prevent already-tracked dependencies from being included in commits. The original vendor licenses, notices and redistribution requirements must be reviewed independently; their inclusion does not certify permission or combined-program license compatibility.
+
+The root project license does not grant rights to these dependencies. The original project identifies MemProcFS as AGPL-3.0. Review the exact licenses and combined-program distribution requirements for the versions of MemProcFS, LeechCore and FTDI you use. Excluding vendor files alone does not resolve linked-binary distribution obligations. This package is not a legal compatibility certification.

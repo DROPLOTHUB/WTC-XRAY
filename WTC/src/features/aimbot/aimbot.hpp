@@ -9,6 +9,7 @@
 #endif
 
 #include "ground_prediction.hpp"
+#include "g2g_runtime_policy.hpp"
 #include "ballistic_validation.hpp"
 #include "aircraft_ballistics_policy.hpp"
 #include "aircraft_ammo_trace.hpp"
@@ -23,9 +24,14 @@ namespace aimbot
         bool initialized = false;
         const char* status = "Esperando siguiente muestra";
         bool have_motion = false;
-        uintptr_t owner = 0, movement = 0;
-        vec3_t velocity{}, acceleration{}, last_position{};
-        std::chrono::steady_clock::time_point last_seen{}, last_read{}, last_sample{}, last_solve{}, last_render{};
+        uintptr_t owner = 0, movement = 0, shooter = 0, own_movement = 0;
+        vec3_t velocity{}, acceleration{}, last_position{}, own_velocity{}, own_acceleration{}, last_local_position{};
+        uint64_t epoch=0;
+        g2g_runtime::round_signature round{};
+        const char* target_source="Sin muestra objetivo fiable";
+        const char* own_source="Sin muestra propia fiable";
+        float flight_time=0,error=0; int steps=0;
+        std::chrono::steady_clock::time_point last_seen{}, last_read{}, last_sample{}, last_solution_sample{}, last_solve{}, last_render{};
     };
 
     struct BallisticsData
@@ -159,7 +165,7 @@ namespace aimbot
         }
 
         // La velocidad proviene del cartucho/tabla real. Las propiedades
-        // aerodinámicas auxiliares pueden faltar en la tabla local; en ese caso
+        // aerodinámicas auxiliares pueden faltar en la API; en ese caso
         // el solver desactiva drag, pero NO inventa ni descarta la velocidad.
         const bool have_geometry=aircraft_ballistics_policy::usable_drag_geometry(mass,caliber);
         if (!have_geometry) {mass=0.f;caliber=0.f;drag=0.f;}
@@ -299,6 +305,10 @@ namespace aimbot
     {
         // Sólo munición activa; escoger el cañón de mayor calibre daba el
         // cartucho equivocado y a veces una velocidad de otro proyectil.
+        if (!offsets::api_ballistics_ready) {
+            sdk::ground_ballistics_source = "API sin velocidad/calibre de munición";
+            return false;
+        }
         if (!sdk::cGame || !ballistic_validation::plausible_pointer(sdk::cGame->get_base())) {
             sdk::ground_ballistics_source = "Contenedor de juego no disponible";
             return false;
@@ -367,11 +377,11 @@ namespace aimbot
                 sdk::ground_ballistics_source="Tabla de municion del avion";
             } else if (sdk::air_lead_weapon_selection<0 &&
                 !sdk::air_lead_use_heaviest_weapon && GetBallisticsInfo()) {
-                // Ruta histórica: el contenedor local de la munición activa
+                // Ruta histórica: el contenedor API de la munición activa
                 // podía entregar velocidad aun si la tabla del cañón fallaba.
                 // Nunca sustituir una selección explícita por otra arma.
                 aircraft_global_fallback=true;
-                aircraft_ballistics_status="Contenedor balistico local: municion activa (origen no confirmado)";
+                aircraft_ballistics_status="Contenedor balistico API: municion activa (origen no confirmado)";
             }
         } else GetBallisticsInfo();
 
@@ -381,6 +391,10 @@ namespace aimbot
     inline bool ReadGroundVelocity(uintptr_t base, vec3_t& velocity, uintptr_t& source)
     {
         source=0;
+        if(!offsets::api_ground_velocity_ready) {
+            sdk::ground_velocity_source="API sin ruta completa de velocidad terrestre";
+            return false;
+        }
         const auto reader=[](uintptr_t address,void* data,size_t size) {
             return TargetProcess->Read(address,data,size);
         };
@@ -398,33 +412,59 @@ namespace aimbot
     // Only the selected ground target reaches this path: one fixed-size cache.
     // Solving and DMA are paced independently of rendering (60/120 ms).
     inline auto run(c_unit& unit, vec3_t unit_position, vec3_t local_position,
-        ViewMatrix_t camera_matrix, std::chrono::steady_clock::time_point captured_at) -> void {
+        ViewMatrix_t camera_matrix, std::chrono::steady_clock::time_point captured_at, uintptr_t shooter_base, uint64_t epoch) -> void {
         static AimCacheEntry cache{};
         static std::chrono::steady_clock::time_point next_work{}; // survives target switches
         const auto now = std::chrono::steady_clock::now();
         const auto base = unit.get_base();
-        if (cache.owner != base || now-cache.last_seen > std::chrono::milliseconds(500)) {
+        if (cache.owner != base || cache.shooter != shooter_base || cache.epoch != epoch || now-cache.last_seen > std::chrono::milliseconds(500)) {
             cache = {};
             cache.owner = base;
+            cache.shooter = shooter_base;
+            cache.epoch = epoch;
         }
         cache.last_seen = now;
         sdk::ground_prediction_status = cache.status;
         struct StatusGuard { AimCacheEntry& cache; ~StatusGuard() { cache.status = sdk::ground_prediction_status; } } status_guard{cache};
         if (!ground_prediction::finite(unit_position) || !ground_prediction::finite(local_position)) {
-            cache.initialized = false; sdk::ground_prediction_status = "Posicion invalida"; return;
+            cache.initialized = false; cache.have_motion=false; cache.acceleration={}; cache.own_acceleration={};
+            sdk::ground_prediction_status = "Posicion invalida"; return;
         }
         const float sample_age = std::chrono::duration<float>(now-captured_at).count();
-        if (sample_age < 0 || sample_age > 0.25f) { cache.initialized = false; sdk::ground_prediction_status = "Snapshot atrasado (>250 ms)"; return; }
+        if (!g2g_runtime::sample_valid(sample_age)) {
+            cache.initialized = false; cache.have_motion = false; cache.acceleration={}; cache.own_acceleration={};
+            sdk::ground_prediction_status = "Snapshot G2G invalido o atrasado (>250 ms)"; return;
+        }
+        const g2g_runtime::round_signature round{ballisticsData.velocity,ballisticsData.mass,
+            ballisticsData.caliber*(ballisticsData.caliber_in_mm ? .001f : 1.f),
+            ballisticsData.length,ballisticsData.drag,ballisticsData.max_dist};
+        const ballistic_validation::round_data checked_round{round[0],round[1],round[2],round[3],round[5]};
+        if (!g2g_runtime::signature_valid(round) || !ballistic_validation::valid_round(checked_round)) {
+            cache.initialized=false; sdk::ground_prediction_status="G2G municion invalida o incompleta"; return;
+        }
+        if (cache.round != round) {
+            cache.initialized=false; cache.round=round;
+            sdk::ground_prediction_status="G2G actualizando municion";
+        }
         // Cheap discontinuity check on every frame, before reusing a previous marker.
         const float position_dt = std::chrono::duration<float>(captured_at-cache.last_sample).count();
-        if (cache.have_motion && (position_dt < 0 ||
-            (unit_position-cache.last_position).length() > 5.0f + cache.velocity.length()*std::max(0.0f,position_dt)*2.0f)) {
+        if (captured_at < cache.last_sample) {
+            cache.initialized=false; cache.have_motion=false; cache.acceleration={}; cache.own_acceleration={};
+            sdk::ground_prediction_status="G2G muestra fuera de orden"; return;
+        }
+        if (cache.have_motion && (
+            (unit_position-cache.last_position).length() > 5.0f + cache.velocity.length()*std::max(0.0f,position_dt)*2.0f ||
+            (local_position-cache.last_local_position).length() > 5.0f + cache.own_velocity.length()*std::max(0.0f,position_dt)*2.0f)) {
             cache.have_motion = false;
             cache.initialized = false;
-            cache.acceleration = {};
+            cache.acceleration = {}; cache.own_acceleration = {};
         }
-        if (now >= next_work) {
+        if (now >= next_work && g2g_runtime::newer_sample(position_dt)) {
             next_work = now + std::chrono::milliseconds(60); // throttle failures and target switches too
+            struct AttemptGuard {
+                std::chrono::steady_clock::time_point& next; bool success=false;
+                ~AttemptGuard(){if(!success)next=std::chrono::steady_clock::now()+std::chrono::milliseconds(60);}
+            } attempt{next_work};
             uintptr_t movement = 0;
             vec3_t velocity{};
             if (!ReadGroundVelocity(base, velocity, movement)) {
@@ -433,8 +473,23 @@ namespace aimbot
                 cache.have_motion = false;
                 return;
             }
-            const float dt = std::chrono::duration<float>(now-cache.last_read).count();
-            if (cache.movement != movement) {
+            cache.target_source=sdk::ground_velocity_source;
+            vec3_t own_velocity{}; uintptr_t own_movement = 0;
+            const bool own_known=shooter_base && ReadGroundVelocity(shooter_base,own_velocity,own_movement);
+            cache.own_source=own_known ? sdk::ground_velocity_source : "Lectura propia fallida";
+            sdk::ground_velocity_source=cache.target_source; // do not label own read as target velocity
+            if (!own_known || !ground_prediction::finite(own_velocity) || own_velocity.length() > 150.0f) {
+                cache.initialized = false; cache.have_motion = false;
+                sdk::ground_prediction_status = "G2G sin velocidad propia fiable"; return;
+            }
+            const auto read_time=std::chrono::steady_clock::now();
+            const float read_sample_age=std::chrono::duration<float>(read_time-captured_at).count();
+            if(!g2g_runtime::sample_valid(read_sample_age)){
+                cache.initialized=false;cache.have_motion=false;cache.acceleration={};cache.own_acceleration={};
+                sdk::ground_prediction_status="G2G lectura demasiado tardia";return;
+            }
+            const float dt = std::chrono::duration<float>(read_time-cache.last_read).count();
+            if (cache.movement != movement || cache.own_movement != own_movement) {
                 cache.have_motion = false;
                 cache.initialized = false;
             }
@@ -446,19 +501,29 @@ namespace aimbot
                     cache.acceleration += (measured-cache.acceleration)*alpha;
                 } else cache.acceleration = {};
             } else cache.acceleration = {};
+            // Own acceleration only aligns the sampled launch position; never accelerates the shell after launch.
+            if (cache.have_motion && dt >= .025f && dt <= .3f) {
+                vec3_t measured=(own_velocity-cache.own_velocity)/dt; measured.y=0;
+                if (ground_prediction::finite(measured) && measured.length()<25.f)
+                    cache.own_acceleration+=(measured-cache.own_acceleration)*(1.f-std::exp(-dt/.18f));
+                else {cache.own_acceleration={};cache.initialized=false;}
+            } else cache.own_acceleration={};
             cache.movement = movement;
+            cache.own_movement = own_movement;
+            cache.own_velocity = own_velocity;
+            cache.last_local_position = local_position;
             cache.velocity = velocity;
-            cache.last_read = now;
+            cache.last_read = read_time;
             cache.last_sample = captured_at;
             cache.last_position = unit_position;
             cache.have_motion = true;
             const float speed = velocity.length();
-            const vec3_t historical_acceleration = cache.acceleration;
             if (speed < 0.2f) cache.acceleration = {};
-            next_work = now + std::chrono::milliseconds(speed > 0.1f ? 60 : 120);
+            if (own_velocity.length() < .2f) cache.own_acceleration={};
+            const vec3_t historical_acceleration = cache.acceleration;
             // Preserve existing marker height; ballistic drop is handled only by the solver.
             const float dx = unit_position.x-local_position.x, dz = unit_position.z-local_position.z;
-            vec3_t target = ground_prediction::align_position(unit_position,velocity,historical_acceleration,sample_age);
+            vec3_t target = ground_prediction::align_position(unit_position,velocity,historical_acceleration,read_sample_age);
             target.y += 1.0f + std::sqrt(dx*dx+dz*dz)*(0.143f/150.0f);
             const ground_prediction::Ballistics b{ballisticsData.velocity, ballisticsData.mass,
                 ballisticsData.caliber * (ballisticsData.caliber_in_mm ? 0.001f : 1.0f),
@@ -466,20 +531,33 @@ namespace aimbot
             if (!std::isfinite(b.speed) || b.speed < 50.0f || b.speed > 4000.0f) {
                 cache.initialized = false; sdk::ground_prediction_status = "Velocidad de municion invalida"; return;
             }
-            const auto solution = ground_prediction::solve(local_position,target,velocity,cache.acceleration,b);
+            // Position is sampled; velocity is read now. Do not apply sample age twice.
+            const vec3_t launch_origin = ground_prediction::align_position(local_position,own_velocity,cache.own_acceleration,read_sample_age);
+            const auto solution = ground_prediction::solve(launch_origin,target,velocity,cache.acceleration,b,0,own_velocity);
             if (!solution.valid) { cache.initialized = false; sdk::ground_prediction_status = "Sin solucion balistica convergente"; return; }
             cache.raw_aim_point = solution.point;
-            cache.last_solve = now;
+            cache.last_solve = std::chrono::steady_clock::now(); cache.last_solution_sample=captured_at;
+            next_work=cache.last_solve+std::chrono::milliseconds(speed > .1f || own_velocity.length() > .1f ? 60 : 120);
+            attempt.success=true;
+            cache.flight_time=solution.time;cache.error=solution.error;cache.steps=solution.steps;
             if (!cache.initialized) {
                 cache.aim_point = solution.point;
-                cache.last_render = now;
+                cache.last_render = cache.last_solve;
                 cache.initialized = true;
             }
         }
         if (!cache.initialized) return;
-        const float render_dt = std::clamp(std::chrono::duration<float>(now-cache.last_render).count(),0.0f,0.1f);
-        const float raw_age = std::clamp(std::chrono::duration<float>(now-cache.last_solve).count(),0.0f,0.15f);
-        cache.last_render = now;
+        const auto render_now=std::chrono::steady_clock::now();
+        const float solve_age=std::chrono::duration<float>(render_now-cache.last_solve).count();
+        const float solution_sample_age=std::chrono::duration<float>(render_now-cache.last_solution_sample).count();
+        if (!g2g_runtime::marker_valid(solve_age,solution_sample_age)) {
+            cache.initialized=false; sdk::ground_prediction_status="G2G solucion caducada"; return;
+        }
+        g2g_runtime::current={true,solution_sample_age*1000,solve_age*1000,cache.flight_time,cache.error,
+            cache.steps,cache.own_source,cache.target_source};
+        const float render_dt = std::clamp(std::chrono::duration<float>(render_now-cache.last_render).count(),0.0f,0.1f);
+        const float raw_age = std::clamp(std::chrono::duration<float>(render_now-cache.last_solve).count(),0.0f,0.15f);
+        cache.last_render = render_now;
         const vec3_t live = cache.raw_aim_point + cache.velocity*raw_age;
         // Time-invariant smoothing with velocity feed-forward, not a frame-dependent lag.
         cache.aim_point += cache.velocity*render_dt;
